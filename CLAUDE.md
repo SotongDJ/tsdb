@@ -98,3 +98,9 @@ Lines starting with `#` are comments; blank lines are ignored.
 ### Code Review History
 
 Four rounds of review between Sofia (Sonnet, code) and Matt (Opus, review). All issues resolved. See `reviews/` for full history.
+
+## Shorthand Commands
+
+| Command | Meaning |
+|---------|---------|
+| `kk` | (1) Find every `?vTimestamp` or `?v{14-digit-timestamp}` in the project (e.g. `include_files/head.html`) and replace with `?v{YYYYDDMMhhmmss}` using current time. (2) `git add -A`. (3) `git commit -S` with a descriptive message. |
