@@ -161,5 +161,5 @@ After running `--relate` on `users.dov`, the working directory contains:
 
 Full specifications for the new formats and modes are in the updated whitepapers:
 
-- [DOTSV Whitepaper](/tsdb/posts/dotsv-whitepaper/) — §15 Timestamp Tracking, §16 Related Formats
-- [tsdb Whitepaper](/tsdb/posts/tsdb-whitepaper/) — §13 `--relate` Mode, §14 `--query` Mode, §15 Related Formats
+- [DOTSV Whitepaper](/tsdb/dotsv-whitepaper/) — §15 Timestamp Tracking, §16 Related Formats
+- [tsdb Whitepaper](/tsdb/tsdb-whitepaper/) — §13 `--relate` Mode, §14 `--query` Mode, §15 Related Formats

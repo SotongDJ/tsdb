@@ -104,3 +104,10 @@ Four rounds of review between Sofia (Sonnet, code) and Matt (Opus, review). All 
 | Command | Meaning |
 |---------|---------|
 | `kk` | (1) Find every `?vTimestamp` or `?v{14-digit-timestamp}` in the project (e.g. `include_files/head.html`) and replace with `?v{YYYYDDMMhhmmss}` using current time. (2) `git add -A`. (3) `git commit -S` with a descriptive message. |
+
+## Whitepaper Pages
+
+Whitepaper pages are live mirrors of the `_ref/` sources. Always read the current source before creating or updating:
+
+- `_ref/DOTSV-whitepaper.md` → `page_files/05-dotsv-whitepaper.html` (path `/dotsv-whitepaper/`)
+- `_ref/tsdb-whitepaper.md` → `page_files/06-tsdb-whitepaper.html` (path `/tsdb-whitepaper/`)

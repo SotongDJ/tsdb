@@ -1,0 +1,347 @@
+<!--break type:header content-->
+title = "DOTSV Whitepaper"
+path = ["/dotsv-whitepaper/"]
+page_emoji = ""
+type = "content"
+format = "md"
+<!--break type:content format:md content-->
+# DOTSV — Database Oriented Tab Separated Vehicle
+
+**Version:** 0.2
+**File extensions:** `*.dotsv`, `*.dov`
+**MIME type:** `text/dotsv`
+
+**Revision history:**
+- 0.1 — initial release
+- 0.2 — timestamp tracking; related formats atsv, rtsv, qtsv
+
+---
+
+## 1. Overview
+
+DOTSV is a single-line-per-record, flat-file database format designed for:
+
+- High processing rate via `mmap` and zero-copy parsing
+- Low memory footprint — data is borrowed directly from the memory-mapped buffer
+- Git-traceable diffs — deterministic record ordering produces minimal, meaningful changesets
+- Full Unicode support — CJK, emoji, accented characters pass through unescaped
+- Human readability — plain text, editable in any text editor
+
+A `.dov` file is a valid UTF-8 text file. Every tool that operates on text (grep, awk, diff, cat) works on DOTSV without modification.
+
+---
+
+## 2. Record Format
+
+Each record occupies exactly one line (`\n`-terminated). A record consists of a fixed-width base62-Gu UUID followed by one or more tab-separated key-value pairs.
+
+```
+<12-char-base62-Gu-uuid>\t<key=value>\t<key=value>\t...\n
+```
+
+### Example
+
+```
+NGk26cHcv001	name=Alice	city=東京	age=30
+NGk26cHdn002	name=Bob	city=大阪	msg=hello world
+EGk26cICK001	name=Carol	city=London	note=a\x3Db
+```
+
+---
+
+## 3. UUID Column — Base62-Gu
+
+The first column is always a **12-character base62-Gu UUID** — a time-based, class-prefixed identifier defined by the Base62 Encoding System whitepaper (Format-Gu).
+
+### 3.1 Structure
+
+```
+{class}{G}{century}{year2d}{month}{day}{hour}{minute}{second}{order2}
+  1      1    1       2      1     1    1      1       1        2     = 12 chars
+```
+
+| Position | Length | Segment       | Example | Notes                                    |
+|----------|--------|---------------|---------|------------------------------------------|
+| 1        | 1      | Class prefix  | `N`     | Record type (uppercase A–Z)              |
+| 2        | 1      | Format marker | `G`     | Always literal `G`                       |
+| 3        | 1      | Century       | `k`     | `2026 // 100 = 20` → Format-G char      |
+| 4–5      | 2      | Year (2d)     | `26`    | Decimal year mod 100                     |
+| 6        | 1      | Month         | `c`     | Format-G month table                     |
+| 7        | 1      | Day           | `H`     | Format-G day table                       |
+| 8        | 1      | Hour          | `c`     | Format-G hour table                      |
+| 9        | 1      | Minute        | `v`     | Format-G 60-char alphabet                |
+| 10       | 1      | Second        | `0`     | Format-G 60-char alphabet                |
+| 11–12    | 2      | Order number  | `01`    | Collision resolution (01–99, then base62) |
+
+### 3.2 Properties
+
+| Property      | Specification                                       |
+|---------------|-----------------------------------------------------|
+| Width         | Exactly 12 bytes (fixed)                            |
+| Character set | `[A-Z]G[0-9a-km-zA-NP-Z]{8}[0-9a-zA-Z]{2}`        |
+| Byte position | `line[0..12]`                                       |
+| Followed by   | `\t` at byte 12                                     |
+
+Fixed width enables direct slicing (`&line[..12]`) without scanning. The tab at byte 12 serves as a sanity check, not a parsing necessity.
+
+### 3.3 Sort Order Semantics
+
+Because UUIDs are sorted lexicographically (ASCII byte order), records naturally group and order as:
+
+1. **By class** — all `E`-class records sort before `N`-class, etc.
+2. **By time within class** — the embedded timestamp sorts chronologically within each class prefix.
+3. **By order within second** — the 2-char suffix breaks ties for records created in the same second.
+
+### 3.4 Format-G Alphabet
+
+The Format-G alphabet removes visually ambiguous characters `l` (lowercase L) and `O` (uppercase O), producing a 60-character set:
+
+```
+0123456789abcdefghijkmnopqrstuvwxyzABCDEFGHIJKLMNPQRSTUVWXYZ
+```
+
+---
+
+## 4. Key-Value Pairs
+
+After the UUID and its trailing tab, the remainder of the line is a sequence of `key=value` pairs delimited by `\t`.
+
+- Keys and values are UTF-8 strings.
+- Keys MUST NOT be empty.
+- Values MAY be empty (e.g., `tag=`).
+- Key order within a record is not significant for semantics, but implementations SHOULD maintain a consistent order for git diff stability.
+
+---
+
+## 5. Escaping Rules
+
+DOTSV uses backslash-hex escaping. Only four bytes require escaping when they appear inside a key or value:
+
+| Byte | Escaped Form | Reason                  |
+|------|-------------|-------------------------|
+| `\n` | `\x0A`      | Record delimiter        |
+| `\t` | `\x09`      | Field delimiter         |
+| `=`  | `\x3D`      | Key-value separator     |
+| `\`  | `\\`        | Escape character itself |
+
+### Optional
+
+| Byte | Escaped Form | Reason                         |
+|------|-------------|--------------------------------|
+| `\r` | `\x0D`      | Windows line-ending safety     |
+
+### What is NOT escaped
+
+Everything else passes through literally: CJK characters, emoji, accented Latin, spaces, punctuation. **Most real-world values need zero escaping**, enabling the zero-copy fast path.
+
+---
+
+## 6. File Structure
+
+A `.dov` file consists of two sections separated by a single blank line:
+
+```
+<sorted section>
+
+<pending section>
+# YYYYDDMMhhmmss
+```
+
+### 6.1 Sorted Section
+
+Records sorted lexicographically by UUID. Properties:
+
+- **O(log n) lookup** via binary search on `mmap`
+- **Deterministic ordering** — insert position is defined by UUID, not insertion time
+- **Stable git diffs** — new records appear as single inserted lines in predictable locations
+
+### 6.2 Pending Section
+
+A write-ahead buffer of uncommitted operations, appended after the blank line separator:
+
+```
++<uuid>\t<key=val>\t...\n       insert
+-<uuid>\n                       delete
+~<uuid>\t<key=newval>\t...\n    patch (changed pairs only)
+```
+
+**Read path:** Binary search sorted section, then linear scan pending for overrides.
+**Write path:** Always append — O(1).
+**Compaction:** Merge pending into sorted when it exceeds threshold (default 100 lines).
+
+---
+
+## 7. Comments and Blank Lines
+
+- Lines starting with `#` are comments and MUST be ignored by parsers.
+- Blank lines within the sorted section are not permitted (the first blank line marks the section boundary).
+- Additional blank lines after the section separator are ignored.
+
+---
+
+## 8. In-Place Modification
+
+| Condition                   | Strategy                                              |
+|-----------------------------|-------------------------------------------------------|
+| New line ≤ old line length  | Overwrite in place, pad with trailing spaces          |
+| New line > old line length  | Append a `~` patch to the pending section             |
+
+---
+
+## 9. Parsing — Zero-Copy Fast Path
+
+```rust
+fn parse_record(line: &str) -> (&str, Vec<(&str, &str)>) {
+    let uuid = &line[..12];
+    let kvs = line[13..]
+        .split('\t')
+        .filter_map(|pair| pair.split_once('='))
+        .collect();
+    (uuid, kvs)
+}
+```
+
+- `split` and `split_once` are `memchr`-accelerated in Rust's standard library.
+- When no `\` appears in a value slice, the slice is a direct borrow from the `mmap` — zero allocation.
+
+---
+
+## 10. Design Rationale
+
+| Goal           | Mechanism                                                               |
+|----------------|-------------------------------------------------------------------------|
+| Fast query     | Sorted UUIDs + `mmap` + binary search = O(log n)                       |
+| Fast parse     | Tab-split is `memchr`-SIMD accelerated; fixed-width UUID avoids scanning |
+| Low memory     | Zero-copy borrows from `mmap`; no HashMap, no deserialization tree      |
+| Fast writes    | O(1) append to pending section                                          |
+| Git-traceable  | Sorted records = one-line insertion diffs                               |
+| Human-readable | Plain UTF-8 text; minimal escaping                                      |
+| Full Unicode   | Only 4 control bytes escaped; all other Unicode is literal              |
+
+---
+
+## 11. Concurrency — Lock File Protocol
+
+For every `.dov` file, a corresponding `.dov.lock` file serves as both a kernel-level lock target and a queue manifest.
+
+### 11.1 Lock File Contents
+
+```
+<status>\t<process_id>\t<uuid1>,<uuid2>,...\t<timestamp>\n
+```
+
+| Field      | Spec                                                    |
+|------------|----------------------------------------------------------|
+| Status     | `EXEC` (currently running) or `WAIT` (queued)           |
+| Process ID | 16 lowercase hex chars, randomly generated at startup   |
+| UUID list  | Comma-separated target UUIDs from the action file       |
+| Timestamp  | Unix epoch seconds, used for heartbeat / stale detection |
+
+### 11.2 Conflict Detection
+
+```
+Conflict  =  your_uuids  ∩  any_queued_uuids  ≠  ∅
+```
+
+Opcodes are irrelevant to conflict detection. On conflict, `tsdb` exits immediately without joining the queue.
+
+### 11.3 Crash Safety
+
+`flock()` is released automatically by the kernel when a process exits, even on SIGKILL. Stale entries (timestamp older than 30 seconds) are evicted by the next `WAIT` process.
+
+### 11.4 Locking Granularity
+
+The `flock()` on `.dov.lock` is held only for microseconds — just long enough to read/write the manifest. Actual `.dov` processing happens entirely outside the lock.
+
+---
+
+## 12. Limitations
+
+- Not suitable for values larger than ~1 MB (entire record must fit one line).
+- No built-in indexing beyond UUID — secondary key lookup requires full scan or an external index (`--relate`).
+- Concurrent writers that touch the same UUIDs are rejected.
+- The pending section must be periodically compacted to maintain read performance.
+
+---
+
+## 13. Companion Files
+
+| File               | Purpose                                          |
+|--------------------|--------------------------------------------------|
+| `target.dov`       | The database file                                |
+| `target.dov.lock`  | Queue manifest and `flock()` target              |
+| `target.dov.tmp`   | Transient temp file during atomic write/compact  |
+| `target.kv.rtv`    | Key-value inverted index (generated by --relate) |
+| `target.vk.rtv`    | Value-key inverted index (generated by --relate) |
+
+---
+
+## 14. File Extension and Identification
+
+| Property     | Value                                   |
+|--------------|-----------------------------------------|
+| Full name    | Database Oriented Tab Separated Vehicle |
+| Abbreviation | DOTSV                                   |
+| Extensions   | `.dotsv`, `.dov`                        |
+| Encoding     | UTF-8 (no BOM)                          |
+| Line ending  | `\n` (LF only)                          |
+
+---
+
+## 15. Timestamp Tracking
+
+Every successful write to a `.dov` file appends a timestamp comment as the final line:
+
+```
+# YYYYDDMMhhmmss
+```
+
+The timestamp is in UTC. Field layout: year (4), day (2), month (2), hour (2), minute (2), second (2). Example: `# 20262903143022`.
+
+This comment line is ignored by all existing DOTSV parsers (see §7).
+
+### 15.1 Scope
+
+The timestamp is written after every operation that produces a new `.dov` file:
+
+- Normal action file execution (`tsdb <target.dov> <action.atv>`)
+- Compaction (`tsdb --compact <target.dov>`)
+- After `--relate` completes its implicit compaction
+
+### 15.2 Compaction Behaviour
+
+`--compact` merges the pending section into the sorted section. The resulting file retains exactly the **last timestamp line** — all earlier accumulated timestamps are discarded. A new timestamp is appended reflecting the compaction time.
+
+---
+
+## 16. Related Formats
+
+| Format | Extension | Full name                      | Role                                              | Hand-authored? |
+|--------|-----------|--------------------------------|---------------------------------------------------|----------------|
+| `atsv` | `*.atv`   | Action Tab Separated Vehicle   | Input file for standard `tsdb` write operations   | Yes            |
+| `rtsv` | `*.rtv`   | Relation Tab Separated Vehicle | Generated inverted index over a `.dov` file       | No             |
+| `qtsv` | `*.qtv`   | Query Tab Separated Vehicle    | Input file for `tsdb --query` mode                | Yes            |
+
+### `atsv` (Action TSV)
+
+Formalises the existing action file as a named format. Each line is an opcode-prefixed DOTSV record using `+`, `-`, `~`, or `!`. The parser is byte-identical to the DOTSV pending section parser.
+
+### `rtsv` (Relation TSV)
+
+A generated flat three-column index. Two variants per `.dov`:
+
+| Variant   | Filename           | Column order          |
+|-----------|--------------------|-----------------------|
+| Key-Value | `<target>.kv.rtv` | key, value, uuid-list |
+| Value-Key | `<target>.vk.rtv` | value, key, uuid-list |
+
+Rows sorted lexicographically by col 1, then col 2. UUID array in col 3 is `,`-separated. Last line is a `# YYYYDDMMhhmmss` timestamp matching the source `.dov`. Generated by `tsdb --relate`; never hand-authored.
+
+### `qtsv` (Query TSV)
+
+Input format for `tsdb --query`. Optional first line declares `# mode\tunion` or `# mode\tintersect` (default: `intersect`). Criterion lines:
+
+| Form        | Syntax           | Lookup                                          |
+|-------------|------------------|-------------------------------------------------|
+| Bare token  | `<token>`        | Searches both `kv.rtv` col 1 and `vk.rtv` col 1 |
+| Key + value | `<key>\t<value>` | Exact pair lookup in `kv.rtv`                   |
