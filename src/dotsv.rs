@@ -74,7 +74,8 @@ impl Record {
 
     /// Apply a patch action, updating fields in place.
     /// Fields with value "\x00" (null byte) are deleted.
-    pub fn apply_patch(&mut self, fields: &HashMap<String, String>) {
+    /// Returns an error if the patch would leave the record with no fields.
+    pub fn apply_patch(&mut self, fields: &HashMap<String, String>) -> Result<()> {
         for (k, v) in fields {
             if v == "\x00" {
                 self.fields.remove(k);
@@ -82,6 +83,13 @@ impl Record {
                 self.fields.insert(k.clone(), v.clone());
             }
         }
+        if self.fields.is_empty() {
+            return Err(TsdbError::Other(format!(
+                "patch would remove all fields from record {}",
+                self.uuid
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -281,7 +289,7 @@ impl DotsvFile {
                     };
                     if let Some(entry) = records.get_mut(uuid) {
                         if let Some(rec) = entry {
-                            rec.apply_patch(&fields);
+                            rec.apply_patch(&fields)?;
                         }
                     }
                     // If not in records yet (shouldn't happen), ignore
@@ -368,7 +376,7 @@ fn apply_single_action(db: &mut DotsvFile, action: &Action) -> Result<()> {
                     let old_line = &db.sorted[idx];
                     // Parse, apply patch, re-serialize
                     let mut rec = Record::parse(old_line, 0)?;
-                    rec.apply_patch(&action.fields);
+                    rec.apply_patch(&action.fields)?;
                     let new_serialized = rec.serialize();
                     if new_serialized.len() <= old_line.len() {
                         // In-place overwrite: pad with spaces before newline
@@ -658,5 +666,26 @@ mod tests {
         assert_eq!(db2.sorted.len(), 2);
         assert!(db2.uuid_exists(GOOD_UUID1));
         assert!(db2.uuid_exists(GOOD_UUID2));
+    }
+
+    #[test]
+    fn test_patch_all_fields_to_null_returns_error() {
+        // A record with a single field patched to \x00 should fail because
+        // the result would have no fields, violating the invariant that every
+        // record must have at least one KV pair.
+        let mut db = make_db_with(&[(GOOD_UUID1, &[("name", "Alice")])]);
+        let actions =
+            parse_action_str(&format!("~{}\tname=\\x00\n", GOOD_UUID1)).unwrap();
+        let result = apply_actions(&mut db, &actions);
+        assert!(
+            result.is_err(),
+            "expected error when patch removes all fields, got Ok"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("patch would remove all fields"),
+            "unexpected error message: {}",
+            msg
+        );
     }
 }
