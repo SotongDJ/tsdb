@@ -42,9 +42,9 @@ impl Record {
     }
 
     /// Parse a DOTSV record line (no opcode prefix).
-    /// Trailing spaces (in-place patch padding) are stripped before parsing.
+    /// Trailing spaces (in-place patch padding) are stripped only from the last
+    /// tab-separated field to avoid silently removing spaces from field values.
     pub fn parse(line: &str, line_no: usize) -> Result<Self> {
-        let line = line.trim_end_matches(' ');
         let mut parts = line.splitn(2, '\t');
         let uuid = parts.next().unwrap_or("").to_string();
         crate::base62::validate_uuid(&uuid).map_err(|e| TsdbError::ParseError {
@@ -52,10 +52,22 @@ impl Record {
             message: format!("{}", e),
         })?;
         let kv_part = parts.next().unwrap_or("");
-        let fields = if kv_part.is_empty() {
+        // Strip in-place padding spaces from the tail of the last field only.
+        // Split the kv_part on tabs, trim the trailing spaces off the last segment,
+        // then reassemble before passing to parse_kv_fields.
+        let kv_part_trimmed: String = if kv_part.is_empty() {
+            String::new()
+        } else {
+            let mut segs: Vec<&str> = kv_part.split('\t').collect();
+            if let Some(last) = segs.last_mut() {
+                *last = last.trim_end_matches(' ');
+            }
+            segs.join("\t")
+        };
+        let fields = if kv_part_trimmed.is_empty() {
             HashMap::new()
         } else {
-            parse_kv_fields(kv_part, line_no)?
+            parse_kv_fields(&kv_part_trimmed, line_no)?
         };
         Ok(Record { uuid, fields })
     }

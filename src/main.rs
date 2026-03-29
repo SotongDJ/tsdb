@@ -112,13 +112,15 @@ fn execute_actions(
     // Pre-validate all actions before making any changes
     validate_actions(&db, actions)?;
 
+    // Capture time before applying so elapsed reflects actual apply duration
+    let before_apply = Instant::now();
+    let refresh_interval = Duration::from_secs(REFRESH_INTERVAL_SECS);
+
     // Apply all actions at once
     apply_actions(&mut db, actions)?;
 
-    // Refresh EXEC timestamp after applying (brief operation)
-    let last_refresh = Instant::now();
-    let refresh_interval = Duration::from_secs(REFRESH_INTERVAL_SECS);
-    if last_refresh.elapsed() >= refresh_interval {
+    // Refresh EXEC timestamp if applying took long enough to risk eviction
+    if before_apply.elapsed() >= refresh_interval {
         lock_mgr.refresh_timestamp()?;
     }
 

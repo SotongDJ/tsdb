@@ -172,15 +172,28 @@ impl LockManager {
         // Evict stale entries
         entries.retain(|e| !e.is_stale());
 
-        // Check UUID overlap with existing entries
+        // Check UUID overlap with existing entries.
+        // An empty UUID set means "touches all records" (e.g. compaction), so it
+        // conflicts with every existing entry.
         let our_set: HashSet<&String> = self.uuids.iter().collect();
         for entry in &entries {
-            let their_set: HashSet<&String> = entry.uuids.iter().collect();
-            let overlap: Vec<String> = our_set
-                .intersection(&their_set)
-                .map(|s| (*s).clone())
-                .collect();
-            if !overlap.is_empty() {
+            let conflict = if self.uuids.is_empty() || entry.uuids.is_empty() {
+                // Either side is a full-file writer — always conflicts
+                true
+            } else {
+                let their_set: HashSet<&String> = entry.uuids.iter().collect();
+                our_set.intersection(&their_set).next().is_some()
+            };
+            if conflict {
+                let overlap = if self.uuids.is_empty() || entry.uuids.is_empty() {
+                    vec!["<all>".to_string()]
+                } else {
+                    let their_set: HashSet<&String> = entry.uuids.iter().collect();
+                    our_set
+                        .intersection(&their_set)
+                        .map(|s| (*s).clone())
+                        .collect()
+                };
                 return Err(TsdbError::LockConflict {
                     pid: entry.pid,
                     uuids: overlap,
@@ -227,11 +240,20 @@ impl LockManager {
         // Evict stale EXEC and stale WAIT entries
         entries.retain(|e| !e.is_stale());
 
-        // Check if any non-stale EXEC entry has overlapping UUIDs with us
+        // Check if any non-stale EXEC entry conflicts with us.
+        // An empty UUID set means "touches all records" (e.g. compaction): it is
+        // blocked by ANY existing EXEC entry, and any EXEC entry with an empty set
+        // blocks everyone.
         let our_set: HashSet<&String> = self.uuids.iter().collect();
         let blocking_exec = entries.iter().any(|e| {
-            e.status == EntryStatus::Exec
-                && e.uuids.iter().any(|u| our_set.contains(u))
+            if e.status != EntryStatus::Exec {
+                return false;
+            }
+            // Empty UUID set on either side means full-file conflict
+            if self.uuids.is_empty() || e.uuids.is_empty() {
+                return true;
+            }
+            e.uuids.iter().any(|u| our_set.contains(u))
         });
 
         if blocking_exec {
