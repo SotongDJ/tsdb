@@ -52,7 +52,7 @@ fn unix_secs() -> u64 {
 }
 
 fn current_pid() -> u64 {
-    std::process::id() as u64
+    rand::random::<u64>()
 }
 
 /// Parse lock file contents into entries.
@@ -117,7 +117,9 @@ pub struct LockManager {
 
 impl LockManager {
     pub fn new(dov_path: &Path, uuids: Vec<String>) -> Self {
-        let lock_path = PathBuf::from(format!("{}.lock", dov_path.display()));
+        let mut lock_os: std::ffi::OsString = dov_path.as_os_str().to_os_string();
+        lock_os.push(".lock");
+        let lock_path = PathBuf::from(lock_os);
         LockManager {
             lock_path,
             pid: current_pid(),
@@ -222,19 +224,17 @@ impl LockManager {
         let now = unix_secs();
         let mut entries = self.read_entries(file)?;
 
-        // Evict stale EXEC entries
-        let stale_exec = entries
-            .iter()
-            .any(|e| e.status == EntryStatus::Exec && e.is_stale());
+        // Evict stale EXEC and stale WAIT entries
+        entries.retain(|e| !e.is_stale());
 
-        if stale_exec {
-            entries.retain(|e| !(e.status == EntryStatus::Exec && e.is_stale()));
-        }
+        // Check if any non-stale EXEC entry has overlapping UUIDs with us
+        let our_set: HashSet<&String> = self.uuids.iter().collect();
+        let blocking_exec = entries.iter().any(|e| {
+            e.status == EntryStatus::Exec
+                && e.uuids.iter().any(|u| our_set.contains(u))
+        });
 
-        // Check if there's any non-stale EXEC entry
-        let has_exec = entries.iter().any(|e| e.status == EntryStatus::Exec);
-
-        if has_exec {
+        if blocking_exec {
             return Ok(false);
         }
 

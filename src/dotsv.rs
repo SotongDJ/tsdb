@@ -94,16 +94,18 @@ impl DotsvFile {
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         let text = std::str::from_utf8(data)
             .map_err(|e| TsdbError::Other(format!("UTF-8 decode error: {}", e)))?;
-        Self::from_str(text)
+        Self::parse_str(text)
     }
 
     /// Parse from a string.
-    pub fn from_str(text: &str) -> Result<Self> {
+    pub fn parse_str(text: &str) -> Result<Self> {
         let mut sorted = Vec::new();
         let mut pending = Vec::new();
         let mut in_pending = false;
+        let mut line_no = 0usize;
 
         for line in text.lines() {
+            line_no += 1;
             let line = line.trim_end_matches('\r');
             if !in_pending && line.is_empty() {
                 in_pending = true;
@@ -114,6 +116,21 @@ impl DotsvFile {
                     pending.push(line.to_string());
                 }
             } else {
+                // Validate: sorted lines must be at least 13 bytes and have a valid UUID prefix
+                if line.len() < 13 {
+                    return Err(TsdbError::ParseError {
+                        line: line_no,
+                        message: format!(
+                            "sorted section line too short (need >=13 bytes): {:?}",
+                            line
+                        ),
+                    });
+                }
+                let uuid_str = &line[..12];
+                crate::base62::validate_uuid(uuid_str).map_err(|e| TsdbError::ParseError {
+                    line: line_no,
+                    message: format!("invalid UUID in sorted section: {}", e),
+                })?;
                 sorted.push(line.to_string());
             }
         }
@@ -138,11 +155,13 @@ impl DotsvFile {
             w.write_all(line.as_bytes())?;
             w.write_all(b"\n")?;
         }
-        // Always write the blank separator line
-        w.write_all(b"\n")?;
-        for line in &self.pending {
-            w.write_all(line.as_bytes())?;
+        // Only write separator and pending section when pending is non-empty
+        if !self.pending.is_empty() {
             w.write_all(b"\n")?;
+            for line in &self.pending {
+                w.write_all(line.as_bytes())?;
+                w.write_all(b"\n")?;
+            }
         }
         w.flush()?;
         Ok(())
@@ -254,13 +273,6 @@ impl DotsvFile {
                         }
                     }
                     // If not in records yet (shouldn't happen), ignore
-                }
-                b'!' => {
-                    let rec = Record::parse(rest, i + 1)?;
-                    if !records.contains_key(uuid) {
-                        order.push(uuid.to_string());
-                    }
-                    records.insert(uuid.to_string(), Some(rec));
                 }
                 _ => {
                     return Err(TsdbError::ParseError {
@@ -399,12 +411,12 @@ fn apply_single_action(db: &mut DotsvFile, action: &Action) -> Result<()> {
                         );
                         db.sorted[idx] = padded;
                     } else {
-                        db.pending.push(format!("!{}", rec.serialize()));
+                        db.pending.push(format!("+{}", rec.serialize()));
                     }
                 }
                 Err(_) => {
                     // Append upsert to pending (handles both insert and replace cases)
-                    db.pending.push(format!("!{}", rec.serialize()));
+                    db.pending.push(format!("+{}", rec.serialize()));
                 }
             }
         }
@@ -630,7 +642,7 @@ mod tests {
         buf.push(b'\n'); // separator
         let text = String::from_utf8(buf).unwrap();
 
-        let db2 = DotsvFile::from_str(&text).unwrap();
+        let db2 = DotsvFile::parse_str(&text).unwrap();
         assert_eq!(db2.sorted.len(), 2);
         assert!(db2.uuid_exists(GOOD_UUID1));
         assert!(db2.uuid_exists(GOOD_UUID2));

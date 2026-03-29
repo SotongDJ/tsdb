@@ -44,10 +44,22 @@ fn main() {
 }
 
 fn run_compact_only(dov_path: &Path) -> Result<()> {
-    let mut db = DotsvFile::load(dov_path)?;
-    db.compact()?;
-    atomic_write(&db, dov_path)?;
-    eprintln!("Compacted: {}", dov_path.display());
+    // Acquire lock with empty UUID set before compacting to prevent concurrent writers
+    let lock_mgr = LockManager::new(dov_path, Vec::new());
+    lock_mgr.register()?;
+    lock_mgr.wait_for_exec()?;
+
+    let compact_result: Result<()> = (|| {
+        let mut db = DotsvFile::load(dov_path)?;
+        db.compact()?;
+        atomic_write(&db, dov_path)?;
+        eprintln!("Compacted: {}", dov_path.display());
+        Ok(())
+    })();
+
+    let release_result = lock_mgr.release();
+    compact_result?;
+    release_result?;
     Ok(())
 }
 
@@ -100,27 +112,17 @@ fn execute_actions(
     // Pre-validate all actions before making any changes
     validate_actions(&db, actions)?;
 
-    // Apply all actions
-    let mut last_refresh = Instant::now();
+    // Apply all actions at once
+    apply_actions(&mut db, actions)?;
+
+    // Refresh EXEC timestamp after applying (brief operation)
+    let last_refresh = Instant::now();
     let refresh_interval = Duration::from_secs(REFRESH_INTERVAL_SECS);
-
-    // Apply in batches, refreshing timestamp periodically
-    for (i, action) in actions.iter().enumerate() {
-        apply_actions(&mut db, std::slice::from_ref(action))?;
-
-        // Refresh EXEC timestamp every ~5s
-        if last_refresh.elapsed() >= refresh_interval {
-            lock_mgr.refresh_timestamp()?;
-            last_refresh = Instant::now();
-        }
-
-        // Maybe compact after each action (threshold check is cheap)
-        if (i + 1) % 10 == 0 {
-            maybe_compact(&mut db)?;
-        }
+    if last_refresh.elapsed() >= refresh_interval {
+        lock_mgr.refresh_timestamp()?;
     }
 
-    // Final compact check
+    // Compact if threshold exceeded
     maybe_compact(&mut db)?;
 
     // Step 7: Atomic write
@@ -146,11 +148,8 @@ mod tests {
         impl TempDir {
             pub fn new() -> Self {
                 let path = std::env::temp_dir().join(format!(
-                    "tsdb_test_{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos()
+                    "tsdb_test_{:016x}",
+                    rand::random::<u64>()
                 ));
                 std::fs::create_dir_all(&path).unwrap();
                 TempDir { path }
