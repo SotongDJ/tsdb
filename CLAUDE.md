@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`tsdb` is a Rust CLI database runner for a custom flat-file database format called DOTSV (Database Oriented Tab Separated Vehicle). The project is currently in the specification/design phase — the full architecture is documented in `docs/` but the Rust implementation does not yet exist.
+`tsdb` is a Rust CLI database runner for a custom flat-file database format called DOTSV (Database Oriented Tab Separated Vehicle). The implementation is complete and production-built. Architecture is documented in `docs/`; source is in `src/`.
 
 ## Environment Setup
 
@@ -16,18 +16,19 @@ source "$HOME/.cargo/env"
 
 Add `. "$HOME/.cargo/env"` to `~/.bashrc` to make this permanent.
 
-## Build Commands (once Cargo.toml is created)
+## Build Commands
 
 ```bash
-cargo build                        # build
-cargo test                         # run all tests
+cargo build                        # debug build
+cargo build --release              # production build → target/release/tsdb
+cargo test                         # run all tests (49 tests)
 cargo test <test_name>             # run a single test
 cargo fmt                          # format code
 cargo clippy                       # lint
 cargo mutants                      # mutation testing (gitignore includes mutants.out/)
 ```
 
-Planned dependencies: `memmap2` (memory-mapped file I/O), `memchr` (SIMD byte search), `fs2` (cross-platform flock).
+Dependencies: `fs2` (cross-platform flock), `rand` (random process ID for lock queue).
 
 ## Architecture
 
@@ -74,9 +75,26 @@ Lines starting with `#` are comments; blank lines are ignored.
 - **Queue protocol:** WAIT → EXEC status transitions; stale entries evicted after 30 seconds
 - **Atomic writes:** temp file → rename to prevent corruption
 
+### Source Layout
+
+| File | Responsibility |
+|------|---------------|
+| `src/main.rs` | CLI entry point, orchestration, lock lifecycle |
+| `src/dotsv.rs` | DOTSV file: parse, binary search, apply ops, compact, atomic write |
+| `src/action.rs` | Action file parser (`+` / `-` / `~` / `!`) |
+| `src/lock.rs` | Lock file queue: register, promote, refresh, release |
+| `src/escape.rs` | DOTSV backslash-hex escaping / unescaping |
+| `src/base62.rs` | Base62-Gu UUID validation only (12-char, user-supplied) |
+| `src/error.rs` | Unified `TsdbError` enum |
+
 ### Key Design Principles
 
 - **Same parser everywhere:** Action file format = DOTSV pending section format (no second grammar)
 - **Stream processing:** Constant memory regardless of file size
 - **Fail-strict by default:** Conflicts produce errors rather than silent data loss
 - **Git-traceable:** Sorted records and deterministic ordering make diffs readable
+- **UUIDs are user-supplied:** `tsdb` validates 12-char base62-Gu UUIDs but never generates them
+
+### Code Review History
+
+Four rounds of review between Sofia (Sonnet, code) and Matt (Opus, review). All issues resolved. See `reviews/` for full history.
