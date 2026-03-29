@@ -1,0 +1,33 @@
+<!--break type:layout title:post content-->
+<article class="post">
+    <div class="post-header">
+    <h1 class="post-title">{post_title}</h1>
+    </div>
+    <div class="post-meta">
+        <span class="post-date">{date_show}</span>
+        {post_categories}
+        <!--break type:format title:categories_in_post content-->
+        <a class="post-tag" href="{category_url}">{category_title}</a>
+        <!--break type:layout title:post content-->
+    </div>
+    <div class="post-body">
+    {post_content}
+    </div>
+    <!--break type:layout title:post content-->
+</article>
+{related_content}
+<!--break type:format title:related_frame content-->
+    <div class="related">
+        <h2>Related Posts</h2>
+        <ul class="related-posts">
+            {related_posts_list}
+            <!--break type:format title:related_member content-->
+            <li>
+                <a href="{member_url}">
+                    {member_short}
+                    <small>{member_date}</small>
+                </a>
+            </li>
+            <!--break type:format title:related_frame content-->
+        </ul>
+    </div>

@@ -25,3 +25,7 @@ target
 
 # External reference
 temp/
+
+# MaLTHA build artifacts
+mid_files/
+docs/

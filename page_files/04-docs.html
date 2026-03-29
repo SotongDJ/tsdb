@@ -1,0 +1,144 @@
+<!--break type:header content-->
+title = "Docs"
+path = ["/docs/"]
+page_emoji = ""
+type = "content"
+format = "md"
+<!--break type:content format:md content-->
+# tsdb Technical Reference
+
+`tsdb` is a command-line database runner for DOTSV (Database Oriented Tab Separated Vehicle) flat files.
+
+```
+tsdb <target.dov> <action.txt>
+tsdb <target.dov> --compact
+```
+
+---
+
+## DOTSV File Format
+
+Each record occupies exactly one line:
+
+```
+<12-char-UUID>\t<key=value>\t<key=value>...\n
+```
+
+Files are plain UTF-8 text — readable with `grep`, `awk`, `diff`, or any editor.
+
+### Two-Section Structure
+
+```
+<sorted section>      ← binary-searchable, lexicographic UUID order
+                      ← blank line separator
+<pending section>     ← write-ahead log, O(1) appends
+```
+
+The sorted section supports O(log n) lookup. The pending section is compacted into the sorted section when it exceeds 100 lines. Compaction is a single O(n) sequential pass.
+
+### UUID Column
+
+The first column is always a **12-character base62-Gu UUID**:
+
+```
+{C}{G}{century}{YY}{M}{D}{h}{m}{s}{XX}
+ 1   1    1      2   1  1  1  1  1   2  = 12 chars
+```
+
+- `C` — uppercase class prefix (user-defined record type)
+- `G` — fixed format marker
+- Timestamp encoded in Format-G 60-char alphabet (base62 minus `l` and `O`)
+- `XX` — 2-char order suffix for sub-second collision resolution
+
+UUIDs sort lexicographically by class, then chronologically within each class.
+
+### Escaping
+
+Only four bytes require escaping inside keys or values:
+
+| Byte | Escaped |
+|------|---------|
+| `\t` | `\x09`  |
+| `\n` | `\x0A`  |
+| `=`  | `\x3D`  |
+| `\`  | `\\`    |
+
+Everything else — CJK, emoji, spaces — passes through unescaped.
+
+---
+
+## Action File Opcodes
+
+An action file uses the same format as the DOTSV pending section. Each line is one operation:
+
+```
+# comment (ignored)
+
++NGk26cHcv001	name=Alice	city=Tokyo	age=30
++NGk26cHdn002	name=Bob	city=Osaka
+
+~NGk26cHcv001	city=Kyoto	age=31
+
+-NGk26cHdn002
+
+!EGk26cICK001	name=Carol	city=London
+```
+
+| Opcode | Name   | Behavior                                         |
+|--------|--------|--------------------------------------------------|
+| `+`    | Append | Insert new record — error if UUID exists         |
+| `-`    | Delete | Remove record — error if UUID missing            |
+| `~`    | Patch  | Update named fields — error if UUID missing      |
+| `!`    | Upsert | Full replace if exists, insert if not — no error |
+
+**Strict mode (default):** any conflict aborts the run. The `.dov` file is not modified until all operations are validated.
+
+---
+
+## Concurrency
+
+Multiple `tsdb` instances targeting the same `.dov` file are coordinated through a companion lock file (`target.dov.lock`).
+
+### Protocol
+
+1. Pre-scan action file — collect all target UUIDs
+2. `flock` the `.lock` file exclusively (held for microseconds)
+3. Check UUID set intersection against all queued entries — reject immediately on any overlap
+4. Append a `WAIT` entry to the queue manifest; release lock
+5. Poll until promoted to `EXEC`
+6. Execute; refresh timestamp periodically
+7. Atomic write: `target.dov.tmp` → rename → `target.dov`
+8. Remove own entry from queue manifest
+
+### Lock File Format
+
+```
+EXEC\t<16-hex-pid>\t<uuid1,uuid2,...>\t<unix-timestamp>\n
+WAIT\t<16-hex-pid>\t<uuid1,uuid2,...>\t<unix-timestamp>\n
+```
+
+Instances with **non-overlapping UUID sets can run concurrently**. Stale entries (timestamp > 30 seconds old) are evicted automatically.
+
+---
+
+## Companion Files
+
+| File | Purpose |
+|------|---------|
+| `target.dov` | Database |
+| `target.dov.lock` | Queue manifest and `flock` target |
+| `target.dov.tmp` | Transient during atomic write |
+
+---
+
+## Building
+
+Requires Rust 1.94+.
+
+```bash
+source "$HOME/.cargo/env"
+cargo build --release
+# binary: target/release/tsdb
+```
+
+Dependencies: `memmap2`, `memchr`, `fs2`.

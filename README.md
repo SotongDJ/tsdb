@@ -98,6 +98,64 @@ An action file is UTF-8 text. Each line is one operation, using the same format 
 
 ---
 
+## Common Operations
+
+### Append a record
+
+Create `input.txt` with a `+` line — one tab-separated field per column after the UUID:
+
+```
++NGk26cHcv001	name=Alice	city=東京	age=30
+```
+
+```bash
+tsdb mydb.dov input.txt
+```
+
+Errors if `NGk26cHcv001` already exists.
+
+### Modify a record
+
+Use `~` and list only the fields to change. Unlisted fields are left untouched:
+
+```
+~NGk26cHcv001	city=京都	age=31
+```
+
+To delete a specific field, set its value to `\x00`:
+
+```
+~NGk26cHcv001	age=\x00
+```
+
+Errors if the UUID does not exist.
+
+### Delete a record
+
+Use `-` with just the UUID:
+
+```
+-NGk26cHcv001
+```
+
+Errors if the UUID does not exist.
+
+### Combining operations
+
+Multiple operations in one file are validated together, then applied atomically:
+
+```
++PGk26cHcv001	name=Dave	role=admin
+~NGk26cHcv001	city=大阪
+-NGk26cHdn002
+```
+
+```bash
+tsdb mydb.dov input.txt
+```
+
+---
+
 ## Concurrency
 
 Multiple `tsdb` instances targeting the same `.dov` file are coordinated through a companion lock file (`target.dov.lock`).

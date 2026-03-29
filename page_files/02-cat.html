@@ -1,0 +1,25 @@
+<!--break type:header content-->
+title = "Categories"
+path = ["/category/"]
+open_preview = "Category list"
+more = "true"
+page_emoji = ""
+frame = "categories"
+<!--break type:frame title:categories content-->
+<h1 class="page-title">Categories</h1>
+<div class="categories-list">
+    {categories_content_list}
+    <!--break type:format title:categories_by_section content-->
+    <div class="category-section">
+        <h2><a href="{category_url}">{category_title}</a></h2>
+        <ul class="related-posts">
+            {category_section}
+            <!--break type:format title:member_in_category_section content-->
+            <li>
+                <a href="{member_url}">{member_title}</a>
+            </li>
+            <!--break type:format title:categories_by_section content-->
+        </ul>
+    </div>
+    <!--break type:frame title:categories content-->
+</div>

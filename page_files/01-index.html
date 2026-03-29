@@ -1,0 +1,31 @@
+<!--break type:header content-->
+title = "tsdb"
+path = ["/", "/all/", "/all.html"]
+layout = "index"
+page_emoji = ""
+<!--break type:frame title:index content-->
+<div class="posts">
+    {post_content_list}
+    <!--break type:format title:post_container_preview content-->
+    <div class="post-card" data-url="{post_url}">
+        <h2 class="post-title">
+            <a href="{post_url}">{post_title}</a>
+        </h2>
+        <div class="post-meta">
+            <span class="post-date">{date_show}</span>
+        </div>
+        <div class="post-excerpt">{content_preview}</div>
+        <a class="read-more" href="{post_url}">Read more →</a>
+    </div>
+    <!--break type:format title:post_container_full content-->
+    <div class="post-card">
+        <h2 class="post-title">
+            <a href="{post_url}">{post_title}</a>
+        </h2>
+        <div class="post-meta">
+            <span class="post-date">{date_show}</span>
+        </div>
+        <div class="post-body">{content_full}</div>
+    </div>
+    <!--break type:frame title:index content-->
+</div>

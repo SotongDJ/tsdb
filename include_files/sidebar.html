@@ -1,0 +1,18 @@
+<!--break type:include title:sidebar content-->
+<aside class="sidebar">
+<div class="sidebar-header">
+<h1><a href="{base_url}/">{base_title}</a></h1>
+<p class="sidebar-tagline">{base_tagline}</p>
+</div>
+<nav class="sidebar-nav">
+{page_content_list}
+<!--break type:format title:pages_in_sidebar content-->
+<a class="sidebar-nav-item" href="{page_url}">{page_title}</a>
+<!--break type:format title:active_pages_in_sidebar content-->
+<a class="sidebar-nav-item active" href="{page_url}">{page_title}</a>
+<!--break type:include title:sidebar content-->
+</nav>
+<footer class="sidebar-footer">
+<span>&copy; {base_year} {author_name}</span>
+</footer>
+</aside>

@@ -1,0 +1,32 @@
+<!--break type:header content-->
+title = "Atom Feed"
+path = ["/atom.xml", "/atom/index.xml"]
+base = "atom"
+page_emoji = ""
+<!--break type:frame title:atom content-->
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet href="{base_url}/style.xsl" type="text/xsl"?>
+<rss xmlns:atom="http://www.w3.org/2005/Atom" version="2.0">
+<channel>
+<title>{base_title}</title>
+<link>{base_url}/</link>
+<atom:link href="{base_url}/atom.xml" rel="self" type="application/rss+xml"/>
+<description>{base_tagline}</description>
+<atom:updated>{current_iso8601}</atom:updated>
+<language>en</language>
+<managingEditor>{author_name}</managingEditor>
+<webMaster>{author_name}</webMaster>
+{atom_content_list}
+<!--break type:format title:atom_post content-->
+<item>
+<title>{post_title}</title>
+<link>{base_url}{post_url}</link>
+<guid>{base_url}{post_url}</guid>
+<pubDate>{date_822}</pubDate>
+<description>
+<![CDATA[{content_preview}<br/>{more_element}]]>
+</description>
+</item>
+<!--break type:frame title:atom content-->
+</channel>
+</rss>
