@@ -4,6 +4,8 @@ mod dotsv;
 mod error;
 mod escape;
 mod lock;
+mod query;
+mod relate;
 
 use action::{collect_uuids, parse_action_file};
 use dotsv::{apply_actions, atomic_write, maybe_compact, validate_actions, DotsvFile};
@@ -16,25 +18,36 @@ const REFRESH_INTERVAL_SECS: u64 = 5;
 
 fn usage() -> ! {
     eprintln!("Usage:");
-    eprintln!("  tsdb <target.dov> <action.txt>");
-    eprintln!("  tsdb <target.dov> --compact");
+    eprintln!("  tsdb <target.dov> <action.atv>   apply actions to database");
+    eprintln!("  tsdb <target.dov> --compact       compact pending section");
+    eprintln!("  tsdb --relate <target.dov>        generate .kv.rtv and .vk.rtv indexes");
+    eprintln!("  tsdb --query <query.qtv> <target.dov>  query database, print matching UUIDs");
     std::process::exit(2);
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
-        usage();
-    }
 
-    let dov_path = Path::new(&args[1]);
-    let second_arg = &args[2];
-
-    let result = if second_arg == "--compact" {
-        run_compact_only(dov_path)
-    } else {
-        let action_path = Path::new(second_arg);
-        run_with_actions(dov_path, action_path)
+    let result = match args.len() {
+        3 if args[1] == "--relate" => {
+            run_relate_mode(Path::new(&args[2]))
+        }
+        3 => {
+            let dov_path = Path::new(&args[1]);
+            let second_arg = &args[2];
+            if second_arg == "--compact" {
+                run_compact_only(dov_path)
+            } else {
+                let action_path = Path::new(second_arg);
+                run_with_actions(dov_path, action_path)
+            }
+        }
+        4 if args[1] == "--query" => {
+            let qtv_path = Path::new(&args[2]);
+            let dov_path = Path::new(&args[3]);
+            run_query_mode(qtv_path, dov_path)
+        }
+        _ => usage(),
     };
 
     if let Err(e) = result {
@@ -61,6 +74,42 @@ fn run_compact_only(dov_path: &Path) -> Result<()> {
     compact_result?;
     release_result?;
     Ok(())
+}
+
+fn run_relate_mode(dov_path: &Path) -> Result<()> {
+    if !dov_path.exists() {
+        return Err(TsdbError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("database file not found: {}", dov_path.display()),
+        )));
+    }
+    // Acquire exclusive lock: compact + index generation must be atomic
+    // with respect to concurrent writers.
+    let lock_mgr = LockManager::new(dov_path, Vec::new());
+    lock_mgr.register()?;
+    lock_mgr.wait_for_exec()?;
+
+    let result: Result<()> = (|| {
+        let mut db = DotsvFile::load(dov_path)?;
+        db.compact()?;
+        atomic_write(&db, dov_path)?;
+        // Re-load to get the exact state that was written (including timestamp).
+        let db = DotsvFile::load(dov_path)?;
+        relate::generate_rtvs(dov_path, &db)?;
+        eprintln!("Related: {}", dov_path.display());
+        Ok(())
+    })();
+
+    let release_result = lock_mgr.release();
+    result?;
+    release_result?;
+    Ok(())
+}
+
+fn run_query_mode(qtv_path: &Path, dov_path: &Path) -> Result<()> {
+    // Auto-relate (compact + index generation) before querying.
+    run_relate_mode(dov_path)?;
+    query::run_query(qtv_path, dov_path)
 }
 
 fn run_with_actions(dov_path: &Path, action_path: &Path) -> Result<()> {

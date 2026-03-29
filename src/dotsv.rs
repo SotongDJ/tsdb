@@ -132,7 +132,8 @@ impl DotsvFile {
                 continue;
             }
             if in_pending {
-                if !line.is_empty() {
+                // Skip blank lines and comment lines (including timestamp footer)
+                if !line.is_empty() && !line.starts_with('#') {
                     pending.push(line.to_string());
                 }
             } else {
@@ -168,6 +169,7 @@ impl DotsvFile {
     }
 
     /// Write to a file (creates or truncates).
+    /// Always appends a `# YYYYDDMMhhmmss` timestamp as the final line.
     pub fn write_to(&self, path: &Path) -> Result<()> {
         let file = File::create(path)?;
         let mut w = BufWriter::new(file);
@@ -175,14 +177,16 @@ impl DotsvFile {
             w.write_all(line.as_bytes())?;
             w.write_all(b"\n")?;
         }
-        // Only write separator and pending section when pending is non-empty
-        if !self.pending.is_empty() {
+        // Always write section separator then pending (may be empty)
+        w.write_all(b"\n")?;
+        for line in &self.pending {
+            w.write_all(line.as_bytes())?;
             w.write_all(b"\n")?;
-            for line in &self.pending {
-                w.write_all(line.as_bytes())?;
-                w.write_all(b"\n")?;
-            }
         }
+        // Timestamp footer — last line of every .dov write
+        w.write_all(b"# ")?;
+        w.write_all(current_timestamp().as_bytes())?;
+        w.write_all(b"\n")?;
         w.flush()?;
         Ok(())
     }
@@ -503,6 +507,66 @@ pub fn atomic_write(db: &DotsvFile, target: &Path) -> Result<()> {
     db.write_to(&tmp_path)?;
     fs::rename(&tmp_path, target)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Timestamp helpers
+// ---------------------------------------------------------------------------
+
+/// Return the current UTC time formatted as `YYYYDDMMhhmmss`.
+pub fn current_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format_timestamp(secs)
+}
+
+/// Format a Unix epoch seconds value (UTC) as `YYYYDDMMhhmmss`.
+pub fn format_timestamp(epoch_secs: u64) -> String {
+    let rem = (epoch_secs % 86400) as u32;
+    let h = rem / 3600;
+    let mi = (rem % 3600) / 60;
+    let s = rem % 60;
+    let (y, mo, d) = days_to_ymd(epoch_secs / 86400);
+    format!("{:04}{:02}{:02}{:02}{:02}{:02}", y, d, mo, h, mi, s)
+}
+
+/// Convert days since Unix epoch (1970-01-01) to (year, month, day).
+fn days_to_ymd(days: u64) -> (u32, u32, u32) {
+    let mut remaining = days;
+    let mut year = 1970u32;
+
+    loop {
+        let y_len = if is_leap_year(year) { 366u64 } else { 365u64 };
+        if remaining < y_len {
+            break;
+        }
+        remaining -= y_len;
+        year += 1;
+    }
+
+    let feb = if is_leap_year(year) { 29u64 } else { 28u64 };
+    let dpm: [u64; 12] = [31, feb, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+    // Initialise to December: if the loop subtracts through all 12 months
+    // without breaking (unreachable given correct year-loop output, but
+    // defensive), December is the correct fallback.
+    let mut month = 12u32;
+    for (i, &dim) in dpm.iter().enumerate() {
+        if remaining < dim {
+            month = i as u32 + 1;
+            break;
+        }
+        remaining -= dim;
+    }
+
+    (year, month, remaining as u32 + 1)
+}
+
+fn is_leap_year(y: u32) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
 #[cfg(test)]

@@ -4,6 +4,10 @@
 **Binary:** `tsdb`
 **Usage:** `tsdb <target.dov> <action.txt>`
 
+**Revision history:**
+- 0.1 — initial release
+- 0.2 — --relate and --query modes; atsv/rtsv/qtsv format support; timestamp tracking
+
 ---
 
 ## 1. Overview
@@ -21,15 +25,20 @@ Design principles:
 ## 2. Invocation
 
 ```
-tsdb target.dov action.txt
+tsdb <target.dov> <action.atv>
+tsdb --compact <target.dov>
+tsdb --relate <target.dov>
+tsdb --query <query.qtv> <target.dov>
 ```
 
-| Argument      | Description                                    |
-|---------------|------------------------------------------------|
-| `target.dov`  | The DOTSV database file to operate on          |
-| `action.txt`  | Plain-text file containing operations to apply |
+| Form                                     | Description                                             |
+|------------------------------------------|---------------------------------------------------------|
+| `tsdb <target.dov> <action.atv>`         | Apply operations from an action file to the database    |
+| `tsdb --compact <target.dov>`            | Merge the pending section into the sorted section       |
+| `tsdb --relate <target.dov>`             | Generate (or refresh) the `kv.rtv` / `vk.rtv` indexes  |
+| `tsdb --query <query.qtv> <target.dov>`  | Run filter criteria against the indexes; print UUIDs    |
 
-`tsdb` reads `target.dov` via `mmap`, streams `action.txt` line-by-line, applies each operation, and writes the result back to `target.dov`.
+For standard write mode, `tsdb` reads `target.dov` via `mmap`, streams `action.atv` line-by-line, applies each operation, and writes the result back to `target.dov`. Action files may use the `.atv` extension or any other name; the format is identified by content, not extension.
 
 ---
 
@@ -517,3 +526,119 @@ tsdb data.dov batch3.txt
 | `fs2`       | Cross-platform `flock()` wrapper     |
 
 Minimal dependency surface. No serde, no async runtime, no allocation-heavy parsing frameworks.
+
+---
+
+## 13. `--relate` Mode
+
+```
+tsdb --relate <target.dov>
+```
+
+`--relate` generates a pair of inverted-index files (`rtsv` format) from a `.dov` database. These indexes allow O(log n) lookup of UUIDs by key, value, or key+value pair — without a full scan of the `.dov` file.
+
+### 13.1 Output Files
+
+| File                  | Description                          |
+|-----------------------|--------------------------------------|
+| `<target>.kv.rtv`    | Key-value index — sorted by (key, value)   |
+| `<target>.vk.rtv`    | Value-key index — sorted by (value, key)   |
+
+Each file is a flat three-column `rtsv` file: the first two columns are the lookup key, and the third column is a `,`-separated sorted list of UUIDs that hold that pair.
+
+### 13.2 Execution Steps
+
+1. **Compact** — run `--compact` on `<target.dov>`. This ensures the source reflects all pending writes and has a current timestamp footer.
+2. **Read timestamp** — read the `# YYYYDDMMhhmmss` comment from the last line of `<target.dov>`.
+3. **Check existing indexes** — if both `.rtv` files exist and their timestamp footers match the `.dov` timestamp exactly, skip regeneration and exit cleanly.
+4. **Generate `<target>.kv.rtv`** — stream all sorted-section records; emit one row per (key, value) pair, accumulating UUIDs; sort by (col 1, col 2); write.
+5. **Generate `<target>.vk.rtv`** — same pass with columns 1 and 2 swapped; sort by (col 1, col 2); write.
+6. **Append timestamp footer** — write `# YYYYDDMMhhmmss` as the final line of each `.rtv` file, using the value read from the `.dov` in step 2.
+
+### 13.3 Skip Condition
+
+```
+skip if:
+    kv.rtv exists
+    AND vk.rtv exists
+    AND kv.rtv last line == dov last line   (exact string match)
+    AND vk.rtv last line == dov last line
+```
+
+This makes repeated calls to `--relate` on an unchanged database effectively free.
+
+---
+
+## 14. `--query` Mode
+
+```
+tsdb --query <query.qtv> <target.dov>
+```
+
+`--query` executes filter criteria defined in a `qtsv` file against the `rtsv` indexes of a `.dov` database, printing matching UUIDs to stdout.
+
+### 14.1 Execution Steps
+
+1. **Auto-relate** — implicitly run `--relate <target.dov>`. If the skip condition is met the indexes are already current and this is a no-op.
+2. **Load indexes** — read `<target>.kv.rtv` and `<target>.vk.rtv` into memory.
+3. **Parse `<query.qtv>`** — read the optional mode declaration (default: `intersect`) and each criterion line.
+4. **Resolve each criterion**:
+   - **Bare token** — search col 1 of both `kv.rtv` and `vk.rtv`; union the resulting UUID sets.
+   - **Key + value** — binary search `kv.rtv` on (col 1, col 2); collect UUID array from col 3.
+5. **Combine** — apply the declared mode across all resolved UUID sets:
+   - `union`: a UUID is included if it satisfies at least one criterion.
+   - `intersect`: a UUID is included only if it satisfies all criteria.
+6. **Output** — print each matching UUID to stdout, one per line, in lexicographic order.
+
+### 14.2 Query File Format (`qtsv`)
+
+```
+# mode	intersect
+name	Alice
+city
+Tokyo
+```
+
+- The optional first line declares `# mode\tunion` or `# mode\tintersect`. Default is `intersect`.
+- Criterion lines are either a bare token (tab-free) or a key-tab-value pair.
+- Comment lines (`#`) and blank lines are ignored.
+
+### 14.3 Output
+
+Plain UUID list, one per line, no headers, no opcode prefixes:
+
+```
+NGk26cHcv001
+EGk26cICK001
+```
+
+Suitable for piping into shell processing or as the basis for generating a new action file.
+
+---
+
+## 15. Related Formats
+
+`tsdb` defines three named input and output formats, all sharing the same UTF-8 plain-text conventions as DOTSV:
+
+| Format | Extension | Full name                        | Role                                         | Created by      |
+|--------|-----------|----------------------------------|----------------------------------------------|-----------------|
+| `atsv` | `*.atv`   | Action Tab Separated Vehicle     | Action file input for write operations        | User            |
+| `rtsv` | `*.rtv`   | Relation Tab Separated Vehicle   | Generated inverted index over a `.dov` file   | `tsdb --relate` |
+| `qtsv` | `*.qtv`   | Query Tab Separated Vehicle      | Query criteria input for `--query` mode       | User            |
+
+### `atsv` (Action TSV)
+
+Formalises the existing action file as a first-class named format. The format is unchanged from §3: each line is an opcode-prefixed record using `+`, `-`, `~`, or `!`. The parser is byte-identical to the DOTSV pending section parser — no new grammar.
+
+### `rtsv` (Relation TSV)
+
+A generated flat three-column inverted index. Two variants are produced per `.dov` file:
+
+- `<target>.kv.rtv` — sorted by (key, value); UUID list in col 3
+- `<target>.vk.rtv` — sorted by (value, key); UUID list in col 3
+
+Rows are sorted lexicographically on col 1, then col 2, enabling O(log n) binary search. The last line is a `# YYYYDDMMhhmmss` timestamp matching the source `.dov`. Not hand-authored.
+
+### `qtsv` (Query TSV)
+
+Input format for `--query` mode. The optional mode declaration on the first line selects `union` or `intersect` semantics. Criterion lines are bare tokens (searched in both indexes) or `key\tvalue` pairs (exact lookup in `kv.rtv`). See §14 for full execution semantics.
