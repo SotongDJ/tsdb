@@ -1,0 +1,12 @@
+[package]
+name = "tsdb"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "tsdb"
+path = "src/main.rs"
+
+[dependencies]
+fs2 = "0.4"
+rand = "0.8"
