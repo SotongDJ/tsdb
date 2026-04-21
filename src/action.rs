@@ -126,7 +126,7 @@ pub fn parse_action_line(line: &str, line_no: usize) -> Result<Action> {
     }
 
     let kv_part = &after_uuid[1..]; // skip the leading tab
-    let fields = parse_kv_fields(kv_part, line_no)?;
+    let fields = parse_atv_kv_fields(kv_part, line_no)?;
 
     // Append requires at least one KV field
     if opcode == Opcode::Append && fields.is_empty() {
@@ -144,14 +144,14 @@ pub fn parse_action_line(line: &str, line_no: usize) -> Result<Action> {
     })
 }
 
-/// Parse tab-separated key=value pairs.
-pub fn parse_kv_fields(s: &str, line_no: usize) -> Result<HashMap<String, String>> {
-    let mut map = HashMap::new();
+/// Collect tab-separated `key=value` pairs in input order, preserving
+/// duplicates. Values are unescaped via `escape::unescape`. No combining.
+fn collect_kv_pairs(s: &str, line_no: usize) -> Result<Vec<(String, String)>> {
+    let mut pairs = Vec::new();
     for part in s.split('\t') {
         if part.is_empty() {
             continue;
         }
-        // Find the first '=' that is NOT an escape sequence
         let eq_pos = find_unescaped_equals(part, line_no)?;
         match eq_pos {
             None => {
@@ -171,11 +171,84 @@ pub fn parse_kv_fields(s: &str, line_no: usize) -> Result<HashMap<String, String
                     line: line_no,
                     message: format!("value unescape error: {}", e),
                 })?;
-                map.insert(key, val);
+                pairs.push((key, val));
             }
         }
     }
-    Ok(map)
+    Ok(pairs)
+}
+
+/// Combine ordered `(key, value)` pairs into a `HashMap<String, String>`.
+/// Keys that appear more than once are encoded in canonical DOTSV array
+/// form (`["v1","v2",...]`) preserving input order; single-valued keys
+/// pass through unchanged.
+fn combine_kv_pairs(pairs: Vec<(String, String)>) -> HashMap<String, String> {
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for (k, v) in pairs {
+        if !groups.contains_key(&k) {
+            order.push(k.clone());
+        }
+        groups.entry(k).or_default().push(v);
+    }
+    let mut map = HashMap::new();
+    for k in order {
+        let vs = groups.remove(&k).unwrap();
+        let combined = if vs.len() == 1 {
+            vs.into_iter().next().unwrap()
+        } else {
+            crate::escape::encode_array(&vs)
+        };
+        map.insert(k, combined);
+    }
+    map
+}
+
+/// Parse tab-separated key=value pairs. Repeated keys are combined into
+/// a canonical DOTSV array value `["v1","v2",...]`; single-valued keys
+/// are stored unchanged.
+pub fn parse_kv_fields(s: &str, line_no: usize) -> Result<HashMap<String, String>> {
+    let pairs = collect_kv_pairs(s, line_no)?;
+    Ok(combine_kv_pairs(pairs))
+}
+
+/// Parse tab-separated key=value pairs from an atv line, rejecting any
+/// individual value that looks like a canonical array (`[...]`) or an
+/// object (`{...}`). Arrays must be expressed by repeating the key, not
+/// inline.
+pub fn parse_atv_kv_fields(s: &str, line_no: usize) -> Result<HashMap<String, String>> {
+    let pairs = collect_kv_pairs(s, line_no)?;
+    for (key, val) in &pairs {
+        let bytes = val.as_bytes();
+        if bytes.len() < 2 {
+            continue;
+        }
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if first == b'{' && last == b'}' {
+            return Err(TsdbError::ParseError {
+                line: line_no,
+                message: format!(
+                    "value for key {:?} looks like an object ({{...}}); \
+                     object-valued fields are not supported",
+                    key
+                ),
+            });
+        }
+        if first == b'[' && last == b']' {
+            return Err(TsdbError::ParseError {
+                line: line_no,
+                message: format!(
+                    "value for key {:?} looks like an array ([...]); \
+                     arrays must be expressed by repeating the key \
+                     (e.g. `{k}=a\\t{k}=b`), not inline",
+                    key,
+                    k = key
+                ),
+            });
+        }
+    }
+    Ok(combine_kv_pairs(pairs))
 }
 
 /// Find the position of the first literal '=' that isn't part of an `\x3D` escape.
@@ -311,5 +384,86 @@ mod tests {
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
         assert!(msg.contains("invalid escape sequence"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_repeated_key_combines_into_array() {
+        let line = "+AGk26cH00001\trole=admin\trole=editor\trole=viewer";
+        let action = parse_action_line(line, 1).unwrap();
+        assert_eq!(action.fields["role"], r#"["admin","editor","viewer"]"#);
+    }
+
+    #[test]
+    fn test_single_value_stays_scalar() {
+        let line = "+AGk26cH00001\tname=Alice";
+        let action = parse_action_line(line, 1).unwrap();
+        assert_eq!(action.fields["name"], "Alice");
+    }
+
+    #[test]
+    fn test_mixed_scalar_and_array_fields() {
+        let line = "+AGk26cH00001\tname=Alice\trole=admin\trole=editor\tage=30";
+        let action = parse_action_line(line, 1).unwrap();
+        assert_eq!(action.fields["name"], "Alice");
+        assert_eq!(action.fields["role"], r#"["admin","editor"]"#);
+        assert_eq!(action.fields["age"], "30");
+    }
+
+    #[test]
+    fn test_repeated_key_preserves_order() {
+        let line = "+AGk26cH00001\tt=a\tt=c\tt=b";
+        let action = parse_action_line(line, 1).unwrap();
+        assert_eq!(action.fields["t"], r#"["a","c","b"]"#);
+    }
+
+    #[test]
+    fn test_repeated_key_element_with_special_chars() {
+        // Value with a literal comma and quote; after unescape/encode round trip
+        let line = "+AGk26cH00001\tt=hello\\x2C world\tt=quote\\x22here";
+        // Note: \x2C = ',', \x22 = '"'
+        let action = parse_action_line(line, 1).unwrap();
+        // Expected encoded array: ["hello, world","quote\"here"]
+        assert_eq!(action.fields["t"], r#"["hello, world","quote\"here"]"#);
+    }
+
+    #[test]
+    fn test_reject_atv_value_looking_like_object() {
+        let line = "+AGk26cH00001\tdata={\"a\":1}";
+        let result = parse_action_line(line, 1);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("object"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_reject_atv_value_looking_like_array() {
+        let line = "+AGk26cH00001\troles=[\"a\",\"b\"]";
+        let result = parse_action_line(line, 1);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("array"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_allow_bracket_that_does_not_close() {
+        // A scalar with a leading [ but no trailing ] is fine
+        let line = "+AGk26cH00001\tnote=[TAG] important text";
+        let action = parse_action_line(line, 1).unwrap();
+        assert_eq!(action.fields["note"], "[TAG] important text");
+    }
+
+    #[test]
+    fn test_allow_embedded_brackets() {
+        let line = "+AGk26cH00001\tnote=see [1] and [2]";
+        let action = parse_action_line(line, 1).unwrap();
+        assert_eq!(action.fields["note"], "see [1] and [2]");
+    }
+
+    #[test]
+    fn test_parse_kv_fields_dov_array_survives() {
+        // On .dov read, a canonical array value in a single kv pair must pass
+        // through unchanged (no atv validation on that path).
+        let fields = parse_kv_fields("role=[\"admin\",\"editor\"]", 1).unwrap();
+        assert_eq!(fields["role"], r#"["admin","editor"]"#);
     }
 }

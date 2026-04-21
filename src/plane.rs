@@ -10,7 +10,7 @@
 
 use crate::dotsv::{DotsvFile, Record};
 use crate::error::{Result, TsdbError};
-use crate::escape::escape;
+use crate::escape::{decode_array, escape, is_array_value};
 use crate::relate::read_last_nonempty_line;
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -91,8 +91,21 @@ fn build_plane_rows(
         }
         let rec = Record::parse(line, i + 1)?;
         for (k, v) in &rec.fields {
-            kv_set.insert((k.clone(), v.clone(), rec.uuid.clone()));
-            vk_set.insert((v.clone(), k.clone(), rec.uuid.clone()));
+            if is_array_value(v) {
+                let elements = decode_array(v).map_err(|e| {
+                    TsdbError::ParseError {
+                        line: i + 1,
+                        message: format!("array value for key {:?}: {}", k, e),
+                    }
+                })?;
+                for elem in elements {
+                    kv_set.insert((k.clone(), elem.clone(), rec.uuid.clone()));
+                    vk_set.insert((elem, k.clone(), rec.uuid.clone()));
+                }
+            } else {
+                kv_set.insert((k.clone(), v.clone(), rec.uuid.clone()));
+                vk_set.insert((v.clone(), k.clone(), rec.uuid.clone()));
+            }
         }
     }
 
@@ -279,6 +292,122 @@ mod tests {
         apply_actions(&mut db, &actions).unwrap();
         // Do not compact; write so the dov file exists for timestamp read
         atomic_write(&db, &dov).unwrap();
+        assert!(generate_ptvs(&dov, &db).is_err());
+    }
+
+    fn make_array_db(tmp: &tmp::TempDir) -> std::path::PathBuf {
+        let dov = tmp.path().join("test.dov");
+        let mut db = DotsvFile::empty();
+        let actions = parse_action_str(
+            "+AGk26cH00001\tname=Alice\trole=admin\trole=editor\trole=viewer\n\
+             +AGk26cH00002\tname=Bob\trole=viewer\n",
+        )
+        .unwrap();
+        apply_actions(&mut db, &actions).unwrap();
+        db.compact().unwrap();
+        atomic_write(&db, &dov).unwrap();
+        dov
+    }
+
+    #[test]
+    fn test_array_value_expanded_in_kv_ptv() {
+        let tmp = tmp::TempDir::new();
+        let dov = make_array_db(&tmp);
+        let db = DotsvFile::load(&dov).unwrap();
+        generate_ptvs(&dov, &db).unwrap();
+
+        let content = fs::read_to_string(kv_ptv_path(&dov)).unwrap();
+        // Alice's role array expands into 3 rows
+        assert!(content.contains("role\tadmin\tAGk26cH00001\n"));
+        assert!(content.contains("role\teditor\tAGk26cH00001\n"));
+        assert!(content.contains("role\tviewer\tAGk26cH00001\n"));
+        // Bob's scalar role is also a row
+        assert!(content.contains("role\tviewer\tAGk26cH00002\n"));
+        // No raw [..] form leaks into the index
+        assert!(
+            !content.contains('['),
+            "ptv must not contain canonical array form: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_array_value_expanded_in_vk_ptv() {
+        let tmp = tmp::TempDir::new();
+        let dov = make_array_db(&tmp);
+        let db = DotsvFile::load(&dov).unwrap();
+        generate_ptvs(&dov, &db).unwrap();
+
+        let content = fs::read_to_string(vk_ptv_path(&dov)).unwrap();
+        assert!(content.contains("admin\trole\tAGk26cH00001\n"));
+        assert!(content.contains("editor\trole\tAGk26cH00001\n"));
+        assert!(content.contains("viewer\trole\tAGk26cH00001\n"));
+        assert!(content.contains("viewer\trole\tAGk26cH00002\n"));
+        assert!(!content.contains('['));
+    }
+
+    #[test]
+    fn test_array_row_count() {
+        // Records: Alice (name + 3 roles) = 4, Bob (name + 1 role) = 2 ⇒ 6 triples.
+        let tmp = tmp::TempDir::new();
+        let dov = make_array_db(&tmp);
+        let db = DotsvFile::load(&dov).unwrap();
+        generate_ptvs(&dov, &db).unwrap();
+
+        let content = fs::read_to_string(kv_ptv_path(&dov)).unwrap();
+        let data_rows = content
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .count();
+        assert_eq!(data_rows, 6);
+    }
+
+    #[test]
+    fn test_array_element_with_special_chars_round_trips() {
+        let tmp = tmp::TempDir::new();
+        let dov = tmp.path().join("test.dov");
+        let mut db = DotsvFile::empty();
+        // An element containing both a literal comma and a literal quote
+        // must survive the encode → decode round-trip via --plane.
+        let actions = parse_action_str(
+            "+AGk26cH00001\ttag=Baker St, London\ttag=bob \"hammer\"\n",
+        )
+        .unwrap();
+        apply_actions(&mut db, &actions).unwrap();
+        db.compact().unwrap();
+        atomic_write(&db, &dov).unwrap();
+
+        let db = DotsvFile::load(&dov).unwrap();
+        generate_ptvs(&dov, &db).unwrap();
+
+        let content = fs::read_to_string(kv_ptv_path(&dov)).unwrap();
+        assert!(
+            content.contains("tag\tBaker St, London\tAGk26cH00001\n"),
+            "comma element not preserved: {}",
+            content
+        );
+        assert!(
+            content.contains("tag\tbob \"hammer\"\tAGk26cH00001\n"),
+            "quote element not preserved: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_malformed_array_in_dov_errors() {
+        // Hand-craft a .dov containing a broken canonical-array value to
+        // confirm `--plane` reports a parse error rather than silently
+        // ingesting it as a scalar.
+        let tmp = tmp::TempDir::new();
+        let dov = tmp.path().join("broken.dov");
+        let dov_ts = "20260422120000";
+        let body = format!(
+            "AGk26cH00001\trole=[\"admin\",bare]\n\n{}\n",
+            dov_ts
+        );
+        fs::write(&dov, body).unwrap();
+
+        let db = DotsvFile::load(&dov).unwrap();
         assert!(generate_ptvs(&dov, &db).is_err());
     }
 }
