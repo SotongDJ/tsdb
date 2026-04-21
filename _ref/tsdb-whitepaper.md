@@ -7,6 +7,7 @@
 **Revision history:**
 - 0.1 — initial release
 - 0.2 — --relate and --query modes; atsv/rtsv/qtsv format support; timestamp tracking
+- 0.3 — --plane mode; ptsv (plane inverted-index) format
 
 ---
 
@@ -28,6 +29,7 @@ Design principles:
 tsdb <target.dov> <action.atv>
 tsdb --compact <target.dov>
 tsdb --relate <target.dov>
+tsdb --plane <target.dov>
 tsdb --query <query.qtv> <target.dov>
 ```
 
@@ -35,7 +37,8 @@ tsdb --query <query.qtv> <target.dov>
 |------------------------------------------|---------------------------------------------------------|
 | `tsdb <target.dov> <action.atv>`         | Apply operations from an action file to the database    |
 | `tsdb --compact <target.dov>`            | Merge the pending section into the sorted section       |
-| `tsdb --relate <target.dov>`             | Generate (or refresh) the `kv.rtv` / `vk.rtv` indexes  |
+| `tsdb --relate <target.dov>`             | Generate (or refresh) the `kv.rtv` / `vk.rtv` indexes   |
+| `tsdb --plane <target.dov>`              | Generate (or refresh) the `kv.ptv` / `vk.ptv` indexes   |
 | `tsdb --query <query.qtv> <target.dov>`  | Run filter criteria against the indexes; print UUIDs    |
 
 For standard write mode, `tsdb` reads `target.dov` via `mmap`, streams `action.atv` line-by-line, applies each operation, and writes the result back to `target.dov`. Action files may use the `.atv` extension or any other name; the format is identified by content, not extension.
@@ -569,7 +572,51 @@ This makes repeated calls to `--relate` on an unchanged database effectively fre
 
 ---
 
-## 14. `--query` Mode
+## 14. `--plane` Mode
+
+```
+tsdb --plane <target.dov>
+```
+
+`--plane` generates a pair of fully flattened inverted-index files (`ptsv` format) from a `.dov` database. It is the denormalised counterpart to `--relate`: each `(key, value, uuid)` triple occupies its own row, so there is no array nesting in column 3.
+
+### 14.1 Output Files
+
+| File                  | Description                                              |
+|-----------------------|----------------------------------------------------------|
+| `<target>.kv.ptv`    | Key-value flat index — sorted by (key, value, uuid)      |
+| `<target>.vk.ptv`    | Value-key flat index — sorted by (value, key, uuid)      |
+
+Each file is a three-column `ptsv` file with exactly one UUID per row. For a `.rtv` row whose column 3 contains *j* UUIDs, the corresponding `.ptv` produces *j* rows.
+
+### 14.2 Execution Steps
+
+Identical to `--relate` except the index schema is denormalised:
+
+1. **Compact** — run `--compact` on `<target.dov>` so the sorted section reflects all pending writes and the timestamp is current.
+2. **Read timestamp** — read the `# YYYYDDMMhhmmss` comment from the last line of `<target.dov>`.
+3. **Check existing indexes** — if both `.ptv` files exist and their timestamp footers match the `.dov` timestamp exactly, skip regeneration and exit cleanly.
+4. **Generate `<target>.kv.ptv`** — stream all sorted-section records; emit one row per `(key, value, uuid)` triple; sort by (col 1, col 2, col 3); write.
+5. **Generate `<target>.vk.ptv`** — same pass with columns 1 and 2 swapped.
+6. **Append timestamp footer** — write `# YYYYDDMMhhmmss` as the final line of each `.ptv` file, using the value read from the `.dov` in step 2.
+
+### 14.3 Skip Condition
+
+```
+skip if:
+    kv.ptv exists
+    AND vk.ptv exists
+    AND kv.ptv last line == dov last line   (exact string match)
+    AND vk.ptv last line == dov last line
+```
+
+### 14.4 Relationship to `--relate`
+
+`--plane` and `--relate` are independent. They write to separate files (`*.ptv` vs `*.rtv`) and each maintains its own skip-if-current check. A `.dov` with both commands run will have four index files. `--query` currently consumes `rtsv`; `ptsv` is provided for external consumers that prefer one-record-per-line output.
+
+---
+
+## 15. `--query` Mode
 
 ```
 tsdb --query <query.qtv> <target.dov>
@@ -577,7 +624,7 @@ tsdb --query <query.qtv> <target.dov>
 
 `--query` executes filter criteria defined in a `qtsv` file against the `rtsv` indexes of a `.dov` database, printing matching UUIDs to stdout.
 
-### 14.1 Execution Steps
+### 15.1 Execution Steps
 
 1. **Auto-relate** — implicitly run `--relate <target.dov>`. If the skip condition is met the indexes are already current and this is a no-op.
 2. **Load indexes** — read `<target>.kv.rtv` and `<target>.vk.rtv` into memory.
@@ -590,7 +637,7 @@ tsdb --query <query.qtv> <target.dov>
    - `intersect`: a UUID is included only if it satisfies all criteria.
 6. **Output** — print each matching UUID to stdout, one per line, in lexicographic order.
 
-### 14.2 Query File Format (`qtsv`)
+### 15.2 Query File Format (`qtsv`)
 
 ```
 # mode	intersect
@@ -603,7 +650,7 @@ Tokyo
 - Criterion lines are either a bare token (tab-free) or a key-tab-value pair.
 - Comment lines (`#`) and blank lines are ignored.
 
-### 14.3 Output
+### 15.3 Output
 
 Plain UUID list, one per line, no headers, no opcode prefixes:
 
@@ -616,14 +663,15 @@ Suitable for piping into shell processing or as the basis for generating a new a
 
 ---
 
-## 15. Related Formats
+## 16. Related Formats
 
-`tsdb` defines three named input and output formats, all sharing the same UTF-8 plain-text conventions as DOTSV:
+`tsdb` defines four named input and output formats, all sharing the same UTF-8 plain-text conventions as DOTSV:
 
-| Format | Extension | Full name                        | Role                                         | Created by      |
-|--------|-----------|----------------------------------|----------------------------------------------|-----------------|
+| Format | Extension | Full name                        | Role                                          | Created by      |
+|--------|-----------|----------------------------------|-----------------------------------------------|-----------------|
 | `atsv` | `*.atv`   | Action Tab Separated Vehicle     | Action file input for write operations        | User            |
-| `rtsv` | `*.rtv`   | Relation Tab Separated Vehicle   | Generated inverted index over a `.dov` file   | `tsdb --relate` |
+| `rtsv` | `*.rtv`   | Relation Tab Separated Vehicle   | Inverted index (UUID array in col 3)          | `tsdb --relate` |
+| `ptsv` | `*.ptv`   | Plane Tab Separated Vehicle      | Flattened inverted index (one row per UUID)   | `tsdb --plane`  |
 | `qtsv` | `*.qtv`   | Query Tab Separated Vehicle      | Query criteria input for `--query` mode       | User            |
 
 ### `atsv` (Action TSV)
@@ -639,6 +687,15 @@ A generated flat three-column inverted index. Two variants are produced per `.do
 
 Rows are sorted lexicographically on col 1, then col 2, enabling O(log n) binary search. The last line is a `# YYYYDDMMhhmmss` timestamp matching the source `.dov`. Not hand-authored.
 
+### `ptsv` (Plane TSV)
+
+The fully flattened (denormalised) sibling of `rtsv`. Instead of a comma-separated UUID array in column 3, every `(col1, col2, uuid)` triple occupies its own row:
+
+- `<target>.kv.ptv` — sorted by (key, value, uuid); single UUID in col 3
+- `<target>.vk.ptv` — sorted by (value, key, uuid); single UUID in col 3
+
+A `.rtv` row whose UUID array has *j* elements expands to *j* `.ptv` rows. Sort order matches `rtsv` for the first two columns; the uuid becomes the tiebreaker in column 3. The last line is a `# YYYYDDMMhhmmss` timestamp matching the source `.dov`. Generated by `tsdb --plane`; never hand-authored. Designed for shell pipelines (`awk`, `sort -u`, `join`) that expect one record per line. See §14 for full generation semantics.
+
 ### `qtsv` (Query TSV)
 
-Input format for `--query` mode. The optional mode declaration on the first line selects `union` or `intersect` semantics. Criterion lines are bare tokens (searched in both indexes) or `key\tvalue` pairs (exact lookup in `kv.rtv`). See §14 for full execution semantics.
+Input format for `--query` mode. The optional mode declaration on the first line selects `union` or `intersect` semantics. Criterion lines are bare tokens (searched in both indexes) or `key\tvalue` pairs (exact lookup in `kv.rtv`). See §15 for full execution semantics.

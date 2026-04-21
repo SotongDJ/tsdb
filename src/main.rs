@@ -4,6 +4,7 @@ mod dotsv;
 mod error;
 mod escape;
 mod lock;
+mod plane;
 mod query;
 mod relate;
 
@@ -21,6 +22,7 @@ fn usage() -> ! {
     eprintln!("  tsdb <target.dov> <action.atv>   apply actions to database");
     eprintln!("  tsdb <target.dov> --compact       compact pending section");
     eprintln!("  tsdb --relate <target.dov>        generate .kv.rtv and .vk.rtv indexes");
+    eprintln!("  tsdb --plane <target.dov>         generate .kv.ptv and .vk.ptv (flattened) indexes");
     eprintln!("  tsdb --query <query.qtv> <target.dov>  query database, print matching UUIDs");
     std::process::exit(2);
 }
@@ -31,6 +33,9 @@ fn main() {
     let result = match args.len() {
         3 if args[1] == "--relate" => {
             run_relate_mode(Path::new(&args[2]))
+        }
+        3 if args[1] == "--plane" => {
+            run_plane_mode(Path::new(&args[2]))
         }
         3 => {
             let dov_path = Path::new(&args[1]);
@@ -97,6 +102,34 @@ fn run_relate_mode(dov_path: &Path) -> Result<()> {
         let db = DotsvFile::load(dov_path)?;
         relate::generate_rtvs(dov_path, &db)?;
         eprintln!("Related: {}", dov_path.display());
+        Ok(())
+    })();
+
+    let release_result = lock_mgr.release();
+    result?;
+    release_result?;
+    Ok(())
+}
+
+fn run_plane_mode(dov_path: &Path) -> Result<()> {
+    if !dov_path.exists() {
+        return Err(TsdbError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("database file not found: {}", dov_path.display()),
+        )));
+    }
+    // Exclusive lock: compact + index generation must be atomic vs writers.
+    let lock_mgr = LockManager::new(dov_path, Vec::new());
+    lock_mgr.register()?;
+    lock_mgr.wait_for_exec()?;
+
+    let result: Result<()> = (|| {
+        let mut db = DotsvFile::load(dov_path)?;
+        db.compact()?;
+        atomic_write(&db, dov_path)?;
+        let db = DotsvFile::load(dov_path)?;
+        plane::generate_ptvs(dov_path, &db)?;
+        eprintln!("Planed: {}", dov_path.display());
         Ok(())
     })();
 
