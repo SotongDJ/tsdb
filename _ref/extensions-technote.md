@@ -1,8 +1,8 @@
 # tsdb Extensions — Technical Note
 
-**Version:** 0.2 Draft
-**Date:** 2026-04-21
-**Scope:** Four new file formats (`atsv`, `rtsv`, `ptsv`, `qtsv`) and three new running modes (`--relate`, `--plane`, `--query`)
+**Version:** 0.3 Draft
+**Date:** 2026-04-22
+**Scope:** Four new file formats (`atsv`, `rtsv`, `ptsv`, `qtsv`), three new running modes (`--relate`, `--plane`, `--query`), and canonical array values with per-element expansion in `ptsv`.
 
 ---
 
@@ -50,14 +50,40 @@ Identical to the DOTSV pending section. Each line is one operation:
 \n                             blank line, ignored
 ```
 
-### 1.3 Properties
+Array-valued fields use **repeated keys** on the same line:
+
+```
++PGk26cHcv001\tname=Dave\trole=admin\trole=editor\trole=viewer
+```
+
+During parse, repeated keys are combined into a single canonical array value
+before the record is committed to the database:
+
+```
+PGk26cHcv001\tname=Dave\trole=["admin","editor","viewer"]
+```
+
+Element order is preserved from the action file; duplicates are kept. The
+canonical form is a JSON-style array of double-quoted elements with
+element-level escaping `"`→`\"` and `\`→`\\` — see DOTSV §4.1 for the grammar.
+
+### 1.3 Shape Validation
+
+The `atsv` parser rejects any single value whose first byte is `[` or `{`
+**and** whose last byte is the matching closer (`]` or `}`). This prevents a
+caller from smuggling an already-formatted array or object through a single
+key=value pair — arrays must be expressed via the repeated-key mechanism, and
+objects and nested arrays are not supported at all. Non-closing prefixes
+(`[open`, `{open`) pass through as ordinary scalar values.
+
+### 1.4 Properties
 
 | Property | Value |
 |---|---|
 | Encoding | UTF-8, no BOM |
 | Line ending | `\n` (LF only) |
-| Escaping | Same as DOTSV (`\x09`, `\x0A`, `\x3D`, `\\`) |
-| Schema | Same parser as DOTSV pending section — no second grammar |
+| Escaping | Same as DOTSV (`\x09`, `\x0A`, `\x3D`, `\\`) plus element-level `\"` / `\\` inside canonical arrays |
+| Schema | DOTSV pending-section parser + repeated-key coalescing + array/object shape rejection |
 
 ---
 
@@ -164,7 +190,18 @@ This value is used by `--relate` to decide whether regeneration is needed (see �
 
 ### 3.1 Overview
 
-A `ptsv` file is a flat three-column index derived from a DOTSV database. It answers the same question as `rtsv` (*which UUIDs hold this key-value pair?*), but without array nesting in column 3.
+A `ptsv` file is a flat three-column index derived from a DOTSV database. It answers the same question as `rtsv` (*which UUIDs hold this key-value pair?*), but with **two forms of flattening**:
+
+1. No UUID array nesting in column 3 — one UUID per row.
+2. No canonical-array values in column 2 — each array element becomes its own row.
+
+A record with `role=["admin","editor","viewer"]` held by UUID `PGk26cHcv001` produces three `ptsv` rows:
+
+```
+role	admin	PGk26cHcv001
+role	editor	PGk26cHcv001
+role	viewer	PGk26cHcv001
+```
 
 Two variants are generated from each `.dov`, differentiated by column order:
 
@@ -187,7 +224,7 @@ Each row is a single tab-separated line with exactly three columns and exactly o
 | 2 | value | key |
 | 3 | single UUID | single UUID |
 
-If the corresponding `rtsv` row would carry *j* UUIDs in col 3, `ptsv` emits *j* rows — one per UUID. If `col1` has *i* distinct `col2` values each linked to *j* UUIDs, the index grows to `i × j` rows.
+If the corresponding `rtsv` row would carry *j* UUIDs in col 3, `ptsv` emits *j* rows — one per UUID. Additionally, if the source record's value is a canonical array with *m* elements, each element contributes its own set of rows (so one `(key, array-value, uuid-list)` pair in `rtsv` fans out to `m × j` rows in `ptsv`). Literal commas, brackets, and quotes inside array elements are preserved verbatim (the array codec escapes only `"` and `\` inside each element and decodes them back on expansion).
 
 ### 3.3 Example
 
@@ -402,14 +439,16 @@ tsdb --plane <target.dov>
 
 ### 7.2 Behaviour
 
-`--plane` mirrors `--relate` but emits `ptsv` files instead of `rtsv` files:
+`--plane` mirrors `--relate` but emits `ptsv` files instead of `rtsv` files, and splits canonical array values along the way:
 
 1. **Compact** — run `--compact` on `<target.dov>`.
 2. **Read timestamp** — read the timestamp from the last line of `<target.dov>`.
 3. **Check existing index** — if `<target>.kv.ptv` and `<target>.vk.ptv` both exist and their footers match the `.dov` timestamp → skip regeneration.
-4. **Generate `<target>.kv.ptv`** — stream all records from the sorted section; emit one row per `(key, value, uuid)` triple; sort by (col 1, col 2, col 3); write.
-5. **Generate `<target>.vk.ptv`** — same pass with columns 1 and 2 swapped.
+4. **Generate `<target>.kv.ptv`** — stream all records from the sorted section; for each `(key, value)` pair, if the value is in canonical array form decode it and emit one row per `(key, element, uuid)` triple, otherwise emit a single `(key, value, uuid)` row; sort by (col 1, col 2, col 3); write.
+5. **Generate `<target>.vk.ptv`** — same pass with the array expansion applied on the col-1 side, emitting `(element, key, uuid)` rows.
 6. **Append timestamp footer** — write `# YYYYDDMMhhmmss` as the final line of each `.ptv` file.
+
+A malformed canonical array value in the source `.dov` (unquoted element, trailing backslash, missing closing bracket) aborts generation with a parse error rather than producing a partial or corrupt index.
 
 ### 7.3 Skip Condition
 
@@ -487,6 +526,9 @@ Plain UUID list, one per line, no headers, no opcode prefixes. Suitable for pipi
 
 | Decision | Reason |
 |---|---|
+| Arrays via repeated keys + canonical on-disk form | Keeps the action file format (`key=value` repeats) trivial to generate by hand or by script. Storing the combined value in canonical JSON-style form on disk gives `--plane` an unambiguous shape to detect — no heuristic comma-splitting that could misclassify literal commas in scalar values. |
+| `--relate` keeps arrays packed; `--plane` expands them | `rtsv` is for binary search — expanding arrays would bloat the row count and break the one-row-per-`(key, value)` invariant. `ptsv` is already row-per-UUID, so also splitting on array elements is a natural extension that lets shell tools filter on individual list members. |
+| Reject `[...]` / `{...}`-shaped scalar values in `atsv` | Prevents ambiguity between a string that happens to look like an array and an actual array value. Combined with the repeated-key mechanism, this closes the only path by which a nested or object-shaped value could reach the database. |
 | `rtsv` is generated, not hand-authored | The index is a deterministic derivative of the `.dov`; hand-editing would cause drift. The skip-if-current check makes regeneration cheap. |
 | Two `rtsv` variants (kv and vk) | Separate sort orders enable O(log n) binary search for key-first and value-first lookups without a secondary index or full scan. |
 | UUID array in `rtsv` col 3 is `,`-separated (not tab) | Tab is already the column delimiter. Comma avoids a second escaping layer and keeps rows machine-readable without a recursive parser. |

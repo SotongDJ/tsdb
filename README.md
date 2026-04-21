@@ -65,7 +65,24 @@ Only four bytes require escaping inside keys or values:
 | `=`  | `\x3D` |
 | `\`  | `\\`   |
 
-Everything else — CJK, emoji, accented Latin, spaces — passes through unescaped.
+Everything else — CJK, emoji, accented Latin, spaces, commas, quotes — passes through unescaped.
+
+### Arrays
+
+Multi-valued fields use **repeated keys** in the action file and a canonical
+JSON-style array on disk:
+
+| Layer        | Form                                           |
+|--------------|------------------------------------------------|
+| atv input    | `role=admin\trole=editor\trole=viewer`         |
+| dov on disk  | `role=["admin","editor","viewer"]`             |
+| `--plane`    | one row per element                            |
+| `--relate`   | one row per `(key,value)` — array stays packed |
+
+Inside an array element, only `"` and `\` are escaped (`\"`, `\\`); commas,
+brackets, and Unicode pass through. Nested arrays and objects are not
+supported — the action file rejects any single value shaped like `[...]` or
+`{...}`, so collections must be expressed through repeated keys.
 
 ---
 
@@ -157,6 +174,22 @@ Multiple operations in one file are validated together, then applied atomically:
 tsdb mydb.dov input.txt
 ```
 
+### Array fields
+
+Repeat the key for each element. The on-disk record uses the canonical form:
+
+```
+# input
++PGk26cHcv001	name=Dave	role=admin	role=editor	role=viewer
+
+# stored on disk as
+PGk26cHcv001	name=Dave	role=["admin","editor","viewer"]
+```
+
+Patches replace the whole field — supplying `role=admin\trole=ops` overwrites
+any previous list. To clear an array field, set it to `\x00` like any other
+field. Values shaped like `[...]` or `{...}` are rejected by the parser.
+
 ---
 
 ## `--relate` — Build Inverted Indexes
@@ -182,11 +215,15 @@ name	Bob	NGk26cHdn002
 
 The final line is a timestamp matching the source `.dov`. If both index files are already current (same timestamp), `--relate` is a no-op — safe to call before every query.
 
+**Array values stay packed** in `.rtv` files: a record with
+`role=["admin","editor"]` produces one row with `["admin","editor"]` in
+column 2, not one row per element. Use `--plane` for per-element rows.
+
 ---
 
 ## `--plane` — Build Flat Inverted Indexes
 
-`--plane` is the flattened counterpart of `--relate`. Instead of packing the UUID list into a single comma-separated cell, each UUID occupies its own row:
+`--plane` is the flattened counterpart of `--relate`. Each UUID occupies its own row, and canonical array values are **expanded into one row per element**:
 
 ```bash
 tsdb --plane users.dov
@@ -194,7 +231,7 @@ tsdb --plane users.dov
 #          users.vk.ptv  (one row per value/key/UUID triple)
 ```
 
-Equivalent output for the example above:
+Given a record `+PGk26cHcv001\tname=Dave\trole=admin\trole=editor\trole=viewer`:
 
 ```
 # users.kv.ptv
@@ -203,10 +240,16 @@ city	Tokyo	NGk26cHcv001
 city	Tokyo	NGk26cHdn002
 name	Alice	NGk26cHcv001
 name	Bob	NGk26cHdn002
+name	Dave	PGk26cHcv001
+role	admin	PGk26cHcv001
+role	editor	PGk26cHcv001
+role	viewer	PGk26cHcv001
 # 20262903143022
 ```
 
-If `col1` has `i` distinct `col2` values and each pair has `j` UUIDs, the file contains `i × j` rows. Choose `--plane` when downstream tools want one record per line (`join`, `sort -u`, `awk`) and `--relate` when compact binary search is the priority. The two modes write to separate files and each has its own skip-if-current check.
+The `["admin","editor","viewer"]` stored on disk has been split into three rows; literal commas and quotes inside elements survive the round-trip. A malformed canonical array in the `.dov` aborts the run with a parse error rather than producing a corrupt index.
+
+Choose `--plane` when downstream tools want one record per line (`join`, `sort -u`, `awk`) or when you need to filter on individual array elements; choose `--relate` when compact binary search is the priority. The two modes write to separate files and each has its own skip-if-current check.
 
 ---
 

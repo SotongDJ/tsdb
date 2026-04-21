@@ -25,6 +25,8 @@ city	Tokyo	NGk26cHdn002
 
 If `col1` has `i` distinct col2 values and each pair has `j` UUIDs, the index grows to `i × j` rows. Nothing else changes: same tab-separated columns, same escaping, same `# YYYYDDMMhhmmss` timestamp footer.
 
+**Array-valued fields expand too.** A later revision (DOTSV 0.4) added canonical array values on disk — `role=["admin","editor","viewer"]` in a single record. `--plane` splits that array at generation time, so a record with a three-element `role` contributes three `(role, <elem>, uuid)` rows rather than one `(role, ["admin","editor","viewer"], uuid)` row. The `--relate` variant (`.rtv`) keeps arrays packed; only `ptsv` fans them out.
+
 ## Why add it
 
 `rtsv` is optimised for binary search. `ptsv` is optimised for shell pipelines. A `.rtv` row like
@@ -81,6 +83,25 @@ name	Carol	EGk26cICK001
 ```
 
 Six rows for three records of two fields each — exactly what the `i × j` formula predicts.
+
+### With an array field
+
+Add one more record that carries a multi-valued `role` field:
+
+```
++PGk26cHcv001	name=Dave	role=admin	role=editor	role=viewer
+```
+
+On disk, that becomes `role=["admin","editor","viewer"]`. After `tsdb --plane users.dov`, `users.kv.ptv` picks up three extra rows — one per role element — alongside Dave's `name`:
+
+```
+name	Dave	PGk26cHcv001
+role	admin	PGk26cHcv001
+role	editor	PGk26cHcv001
+role	viewer	PGk26cHcv001
+```
+
+The `.rtv` variant keeps that field packed as a single row with the whole array in col 2. For filtering on a specific element (`role = editor`), `ptsv` is the direct hit.
 
 ## When to use which
 

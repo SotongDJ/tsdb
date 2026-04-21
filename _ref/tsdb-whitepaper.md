@@ -8,6 +8,7 @@
 - 0.1 — initial release
 - 0.2 — --relate and --query modes; atsv/rtsv/qtsv format support; timestamp tracking
 - 0.3 — --plane mode; ptsv (plane inverted-index) format
+- 0.4 — array values via repeated keys; `--plane` expands arrays into per-element rows
 
 ---
 
@@ -68,6 +69,45 @@ An action file is a UTF-8 text file. Each line is one operation. The format is i
 
 - Lines starting with `#` are comments.
 - Blank lines are ignored.
+
+### 3.1 Array Fields
+
+An array-valued field is expressed by repeating the same key on one line:
+
+```
++PGk26cHcv001	name=Dave	role=admin	role=editor	role=viewer
+```
+
+`tsdb` combines the repeats into a single canonical array value before writing:
+
+```
+PGk26cHcv001	name=Dave	role=["admin","editor","viewer"]
+```
+
+The on-disk form is a JSON-style array with `"` and `\` element-level escaping;
+see DOTSV §4.1 for the formal grammar. Element order is preserved from the
+action file — if the same key appears with the same value twice, it appears
+twice in the array.
+
+Because the element separator inside the canonical form is `,`, literal commas
+inside an element are carried unescaped: `tag=Baker St, London` in a single-key
+field and `tag=Baker St, London\ttag=London, UK` as a two-element field both
+round-trip through `--plane` without loss.
+
+### 3.2 Shape Validation
+
+A single action-file value MUST NOT look like an array or object literal.
+Any value where the first byte is `[` or `{` **and** the last byte is the
+matching closer (`]` or `}`) is rejected with an error:
+
+```
++PGk26cHcv001	roles=["admin","editor"]        # rejected — looks like array
++PGk26cHcv001	profile={"city":"Tokyo"}         # rejected — looks like object
+```
+
+This ensures arrays enter the database only through the repeated-key mechanism,
+and that objects and nested arrays cannot appear at all. Scalar values that
+start with `[` or `{` but do not close (`[not-an-array`, `{open`) are allowed.
 
 ---
 
@@ -228,12 +268,13 @@ This is a single O(n) sequential pass over the file.
 
 | Condition                         | Behavior              |
 |-----------------------------------|-----------------------|
-| `+` with existing UUID           | Error, abort          |
-| `-` with missing UUID            | Error, abort          |
-| `~` with missing UUID            | Error, abort          |
-| `!` with any UUID                | Always succeeds       |
-| Malformed line in action file     | Error, abort          |
-| Invalid UUID (not 12-char base62-Gu) | Error, abort          |
+| `+` with existing UUID                | Error, abort          |
+| `-` with missing UUID                 | Error, abort          |
+| `~` with missing UUID                 | Error, abort          |
+| `!` with any UUID                     | Always succeeds       |
+| Malformed line in action file         | Error, abort          |
+| Invalid UUID (not 12-char base62-Gu)  | Error, abort          |
+| Value shaped like `[...]` or `{...}`  | Error, abort (§3.2)   |
 
 On error, `tsdb` reports the line number in the action file and the offending content. The target `.dov` file is not modified until all actions are validated (or the operation is atomic via a write-to-temp + rename strategy).
 
@@ -439,7 +480,7 @@ The action file uses the same escaping rules as DOTSV:
 | `=`    | `\x3D`      | Key-value separator       |
 | `\`    | `\\`        | Escape character itself   |
 
-No additional escaping rules. The action format is a strict subset of DOTSV.
+No additional escaping rules at the DOTSV layer. Array elements (§3.1) use a second, independent escape layer — inside an element, `"` → `\"` and `\` → `\\` — which composes cleanly with the outer DOTSV escaping.
 
 ---
 
@@ -578,7 +619,7 @@ This makes repeated calls to `--relate` on an unchanged database effectively fre
 tsdb --plane <target.dov>
 ```
 
-`--plane` generates a pair of fully flattened inverted-index files (`ptsv` format) from a `.dov` database. It is the denormalised counterpart to `--relate`: each `(key, value, uuid)` triple occupies its own row, so there is no array nesting in column 3.
+`--plane` generates a pair of fully flattened inverted-index files (`ptsv` format) from a `.dov` database. It is the denormalised counterpart to `--relate`: each `(key, value, uuid)` triple occupies its own row, so there is no array nesting in column 3. In addition, canonical array values in the source record (see §3.1 / DOTSV §4.1) are split at this stage — each element becomes its own col-2 entry and its own row.
 
 ### 14.1 Output Files
 
@@ -591,14 +632,16 @@ Each file is a three-column `ptsv` file with exactly one UUID per row. For a `.r
 
 ### 14.2 Execution Steps
 
-Identical to `--relate` except the index schema is denormalised:
+Identical to `--relate` except the index schema is denormalised and canonical array values are split:
 
 1. **Compact** — run `--compact` on `<target.dov>` so the sorted section reflects all pending writes and the timestamp is current.
 2. **Read timestamp** — read the `# YYYYDDMMhhmmss` comment from the last line of `<target.dov>`.
 3. **Check existing indexes** — if both `.ptv` files exist and their timestamp footers match the `.dov` timestamp exactly, skip regeneration and exit cleanly.
-4. **Generate `<target>.kv.ptv`** — stream all sorted-section records; emit one row per `(key, value, uuid)` triple; sort by (col 1, col 2, col 3); write.
-5. **Generate `<target>.vk.ptv`** — same pass with columns 1 and 2 swapped.
+4. **Generate `<target>.kv.ptv`** — stream all sorted-section records; for each `(key, value)` pair, if `value` is in canonical array form decode it and emit one row per `(key, element, uuid)` triple, otherwise emit a single `(key, value, uuid)` row; sort by (col 1, col 2, col 3); write.
+5. **Generate `<target>.vk.ptv`** — same pass with the array expansion applied in col 1, emitting `(element, key, uuid)` rows.
 6. **Append timestamp footer** — write `# YYYYDDMMhhmmss` as the final line of each `.ptv` file, using the value read from the `.dov` in step 2.
+
+A malformed canonical array value in the source `.dov` (e.g. unquoted element, trailing backslash, missing closing bracket) aborts generation with a parse error rather than producing a corrupt or partial index.
 
 ### 14.3 Skip Condition
 
@@ -676,7 +719,7 @@ Suitable for piping into shell processing or as the basis for generating a new a
 
 ### `atsv` (Action TSV)
 
-Formalises the existing action file as a first-class named format. The format is unchanged from §3: each line is an opcode-prefixed record using `+`, `-`, `~`, or `!`. The parser is byte-identical to the DOTSV pending section parser — no new grammar.
+Formalises the existing action file as a first-class named format. Each line is an opcode-prefixed record using `+`, `-`, `~`, or `!`. Array-valued fields are expressed by repeating a key on the same line (see §3.1); the `atsv` parser combines the repeats into the canonical array form before writing. `atsv` adds one validation pass on top of the DOTSV pending-section grammar: a single value shaped like `[...]` or `{...}` is rejected (§3.2).
 
 ### `rtsv` (Relation TSV)
 
@@ -685,16 +728,21 @@ A generated flat three-column inverted index. Two variants are produced per `.do
 - `<target>.kv.rtv` — sorted by (key, value); UUID list in col 3
 - `<target>.vk.rtv` — sorted by (value, key); UUID list in col 3
 
-Rows are sorted lexicographically on col 1, then col 2, enabling O(log n) binary search. The last line is a `# YYYYDDMMhhmmss` timestamp matching the source `.dov`. Not hand-authored.
+Rows are sorted lexicographically on col 1, then col 2, enabling O(log n) binary search. Canonical array values from the source `.dov` are kept packed in column 2; use `ptsv` if per-element rows are needed. The last line is a `# YYYYDDMMhhmmss` timestamp matching the source `.dov`. Not hand-authored.
 
 ### `ptsv` (Plane TSV)
 
-The fully flattened (denormalised) sibling of `rtsv`. Instead of a comma-separated UUID array in column 3, every `(col1, col2, uuid)` triple occupies its own row:
+The fully flattened (denormalised) sibling of `rtsv`. Two dimensions are expanded:
 
-- `<target>.kv.ptv` — sorted by (key, value, uuid); single UUID in col 3
-- `<target>.vk.ptv` — sorted by (value, key, uuid); single UUID in col 3
+- The UUID array in col 3 becomes one row per UUID.
+- Canonical array values (DOTSV §4.1) in col 2 become one row per element.
 
-A `.rtv` row whose UUID array has *j* elements expands to *j* `.ptv` rows. Sort order matches `rtsv` for the first two columns; the uuid becomes the tiebreaker in column 3. The last line is a `# YYYYDDMMhhmmss` timestamp matching the source `.dov`. Generated by `tsdb --plane`; never hand-authored. Designed for shell pipelines (`awk`, `sort -u`, `join`) that expect one record per line. See §14 for full generation semantics.
+Files:
+
+- `<target>.kv.ptv` — sorted by (key, value, uuid); single UUID in col 3, single element in col 2
+- `<target>.vk.ptv` — sorted by (value, key, uuid); single UUID in col 3, single element in col 1
+
+Sort order matches `rtsv` for the first two columns; the uuid becomes the tiebreaker in column 3. The last line is a `# YYYYDDMMhhmmss` timestamp matching the source `.dov`. Generated by `tsdb --plane`; never hand-authored. Designed for shell pipelines (`awk`, `sort -u`, `join`) that expect one record per line, and for per-element filtering on array-valued fields. See §14 for full generation semantics.
 
 ### `qtsv` (Query TSV)
 
