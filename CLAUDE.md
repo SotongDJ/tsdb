@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`tsdb` is a Rust CLI database runner for a custom flat-file database format called DOTSV (Database Oriented Tab Separated Vehicle). The implementation is complete and production-built. Architecture is documented in `docs/`; source is in `src/`.
+`tsdb` is a Rust CLI database runner for a custom flat-file database format called DOTSV (Database Oriented Tab Separated Vehicle). The implementation is complete and production-built. Architecture is documented in `_ref/`; source is in `src/`.
 
 ## Environment Setup
 
@@ -21,7 +21,7 @@ Add `. "$HOME/.cargo/env"` to `~/.bashrc` to make this permanent.
 ```bash
 cargo build                        # debug build
 cargo build --release              # production build → target/release/tsdb
-cargo test                         # run all tests (49 tests)
+cargo test                         # run all tests (382 tests as of v0.6)
 cargo test <test_name>             # run a single test
 cargo fmt                          # format code
 cargo clippy                       # lint
@@ -40,22 +40,22 @@ tsdb <target.dov> <action.txt>
 
 Reads an action file line-by-line and applies operations to a DOTSV database file.
 
-### DOTSV File Format (`docs/DOTSV-whitepaper.md`)
+### DOTSV File Format (`_ref/DOTSV-whitepaper.md`)
 
 Plain UTF-8 flat files (`.dov` extension). Each record is a single line:
 ```
 UUID<TAB>key=value<TAB>key=value...<LF>
 ```
 - First column is always a 12-char base62-Gu UUID
-- Files have two sections: a **sorted section** (binary-searchable) and a **pending section** (appended writes, compacted when it exceeds a threshold)
-- Only 4 bytes require escaping: `\t`, `\n`, `\r`, `\`
+- Files have two sections: a **sorted section** (binary-searchable) and a **pending section** (appended writes, compacted when it exceeds 100 lines)
+- Only 5 bytes require escaping: `\t`, `\n`, `\r`, `=`, `\`
 - Zero-copy parsing via tab-splitting; binary search for lookups
 
-### Base62-Gu UUID System (`docs/base62-whitepaper.md`)
+### Base62-Gu UUID System (`_ref/base62-whitepaper.md`)
 
 12-character time-sortable identifiers using a 60-char alphabet (standard base62 minus ambiguous `l` and `O`). Structure: `{class}{G}{century}{year}{month}{day}{hour}{minute}{second}{order2}`. The class prefix is user-defined; the `G` character is a fixed format marker.
 
-### Action File Opcodes (`docs/tsdb-whitepaper.md`)
+### Action File Opcodes (`_ref/tsdb-whitepaper.md`)
 
 The same DOTSV record format is reused for action files, with a leading opcode byte:
 

@@ -1,6 +1,6 @@
 # tsdb — The DOTSV Database Runner
 
-**Version:** 0.5
+**Version:** 0.6
 **Binary:** `tsdb`
 **Usage:** `tsdb <target.dov> <action.txt>`
 
@@ -10,6 +10,7 @@
 - 0.3 — --plane mode; ptsv (plane inverted-index) format
 - 0.4 — array values via repeated keys; `--plane` expands arrays into per-element rows
 - 0.5 — `--relate` / `--plane` also emit a `uuid.rtv` / `uuid.ptv` sorted UUID list; `--version` / `--help` flags; `--show` full-record output (`.dtv`); `--filter` mode with comparison operators (`.ftv`); `.ord.ptv` numeric companion plane index (extends `--plane`); `@present` / `@absent` directives in `.qtv`
+- 0.6 — `--plane` adds a fifth companion file `*.kt.ptv` (key-type plane index — five committed types: `array`, `boolean`, `number`, `string`, `timestamp`); new `--records <uuids.utv|-> <target.dov>` mode emits matching records as JSONL on stdout, with values coerced via the same shared classifier; new `*.utv` UUID-list input format
 
 ---
 
@@ -36,6 +37,7 @@ tsdb --query <query.qtv> <target.dov>
 tsdb --query <query.qtv> <target.dov> --show [<out.dtv>|-]
 tsdb --filter <filter.ftv> <target.dov>
 tsdb --filter <filter.ftv> <target.dov> --show [<out.dtv>|-]
+tsdb --records <uuids.utv|-> <target.dov>
 ```
 
 | Form                                                                    | Description                                                                     |
@@ -43,15 +45,16 @@ tsdb --filter <filter.ftv> <target.dov> --show [<out.dtv>|-]
 | `tsdb <target.dov> <action.atv>`                                        | Apply operations from an action file to the database                            |
 | `tsdb --compact <target.dov>`                                           | Merge the pending section into the sorted section                               |
 | `tsdb --relate <target.dov>`                                            | Generate `kv.rtv`, `vk.rtv`, and `uuid.rtv` indexes                              |
-| `tsdb --plane <target.dov>`                                             | Generate `kv.ptv`, `vk.ptv`, `uuid.ptv`, and `ord.ptv` indexes (v0.5)            |
+| `tsdb --plane <target.dov>`                                             | Generate `kv.ptv`, `vk.ptv`, `uuid.ptv`, `ord.ptv`, and `kt.ptv` indexes (v0.6) |
 | `tsdb --query <query.qtv> <target.dov>`                                 | Run filter criteria against the indexes; print UUIDs                            |
 | `tsdb --query <query.qtv> <target.dov> --show [<out.dtv>\|-]`           | (v0.5) Emit full records (stdout default; `-` alias; `<out.dtv>` writes a file) |
 | `tsdb --filter <filter.ftv> <target.dov>`                               | (v0.5) Rich predicate filter; print matching UUIDs                              |
 | `tsdb --filter <filter.ftv> <target.dov> --show [<out.dtv>\|-]`         | (v0.5) Rich predicate filter; emit full records                                 |
+| `tsdb --records <uuids.utv\|-> <target.dov>`                            | (v0.6) Print matching records as JSONL on stdout (one JSON object per line)     |
 | `tsdb --version`                                                        | Print the tsdb version and exit                                                  |
 | `tsdb --help`                                                           | Print the usage message and exit                                                 |
 
-For standard write mode, `tsdb` reads `target.dov` via `mmap`, streams `action.atv` line-by-line, applies each operation, and writes the result back to `target.dov`. Action files may use the `.atv` extension or any other name; the format is identified by content, not extension.
+For standard write mode, `tsdb` reads `target.dov` into memory (plain `fs::read`), streams `action.atv` line-by-line, applies each operation, and writes the result back to `target.dov` via tmp + rename. Action files may use the `.atv` extension or any other name; the format is identified by content, not extension.
 
 ---
 
@@ -175,56 +178,29 @@ If the UUID exists, the entire record is replaced with the provided KV pairs. If
 
 ## 5. Parsing
 
-The action file parser is a single function — the same one used for the DOTSV pending section:
+The action file parser shares its tokenizer with the DOTSV pending section. Public entry points live in `src/action.rs`:
 
 ```rust
-enum Action<'a> {
-    Append(&'a str, Vec<(&'a str, &'a str)>),
-    Delete(&'a str),
-    Patch(&'a str, Vec<(&'a str, &'a str)>),
-    Upsert(&'a str, Vec<(&'a str, &'a str)>),
-    Comment,
-    Blank,
-}
-
-fn parse_action(line: &str) -> Action<'_> {
-    if line.is_empty() {
-        return Action::Blank;
-    }
-
-    match line.as_bytes()[0] {
-        b'#' => Action::Comment,
-        b'+' => {
-            let rest = &line[1..];
-            let mut fields = rest.split('\t');
-            let uuid = fields.next().unwrap();
-            Action::Append(uuid, parse_kv(fields))
-        }
-        b'-' => Action::Delete(&line[1..].trim_end()),
-        b'~' => {
-            let rest = &line[1..];
-            let mut fields = rest.split('\t');
-            let uuid = fields.next().unwrap();
-            Action::Patch(uuid, parse_kv(fields))
-        }
-        b'!' => {
-            let rest = &line[1..];
-            let mut fields = rest.split('\t');
-            let uuid = fields.next().unwrap();
-            Action::Upsert(uuid, parse_kv(fields))
-        }
-        _ => Action::Blank,  // unknown lines ignored
-    }
-}
-
-fn parse_kv<'a>(fields: impl Iterator<Item = &'a str>) -> Vec<(&'a str, &'a str)> {
-    fields
-        .filter_map(|pair| pair.split_once('='))
-        .collect()
-}
+pub fn parse_action_file(path: &Path) -> Result<Vec<Action>>;
+pub fn parse_action_str(content: &str) -> Result<Vec<Action>>;
+pub fn parse_action_line(line: &str, line_no: usize) -> Result<Action>;
+pub fn parse_kv_fields(s: &str, line_no: usize) -> Result<HashMap<String, String>>;
+pub fn parse_atv_kv_fields(s: &str, line_no: usize) -> Result<HashMap<String, String>>;
 ```
 
-**One byte dispatch, then the same `split('\t')` path as record parsing.** No tokenizer, no lookahead, no state machine.
+Shape (illustrative, not a literal copy):
+
+```text
+parse_action_line(line):
+    skip if blank or '#'-prefixed (line numbers preserved for errors)
+    dispatch on byte 0: '+' → Append, '-' → Delete, '~' → Patch, '!' → Upsert
+    extract UUID via split('\t').next(); validate with base62::validate_uuid
+    parse remaining tab-separated fields with parse_atv_kv_fields
+        (collapses repeated keys into the canonical [...] array form;
+         rejects single values shaped like [...] or {...} per §3.2)
+```
+
+**One byte dispatch, then the same `split('\t')` path as record parsing.** No tokenizer, no lookahead, no state machine. Errors carry the offending line number for diagnostics.
 
 ---
 
@@ -240,23 +216,25 @@ action.txt ────────►│  line-by-line │
                            │
                     ┌──────▼───────┐
                     │  parse opcode │  ◄── 1 byte check
-                    │  + split KV   │  ◄── memchr-accelerated
+                    │  + split KV   │  ◄── std::str::split('\t')
                     └──────┬───────┘
                            │
                     ┌──────▼───────┐
 target.dov ◄───────│    apply op   │
-  (mmap)           │  to .dov file │
+ (fs::read)         │  to .dov file │
                     └──────────────┘
 ```
 
 ### 6.2 Operation Strategies
 
-| Operation | Strategy                                                       |
-|-----------|----------------------------------------------------------------|
-| Append    | Binary search for insert position → write to pending section   |
-| Delete    | Binary search → mark in pending section                        |
-| Patch     | Binary search → in-place overwrite if fits, else pending patch |
-| Upsert    | Binary search → overwrite or append depending on existence     |
+| Operation | Strategy                                                                                            |
+|-----------|-----------------------------------------------------------------------------------------------------|
+| Append    | Append `+<uuid>\t…` line to the pending section                                                     |
+| Delete    | Append `-<uuid>` tombstone to the pending section                                                   |
+| Patch     | Binary search the sorted section; in-place overwrite if the new line fits (space-padded), else append `~<uuid>\t…` to pending |
+| Upsert    | Binary search the sorted section; in-place overwrite if it fits, else append `+<uuid>\t…` to pending |
+
+Any UUID not found in the sorted section by binary search is assumed to live in the pending section, which is replayed in order during compaction; the patch / upsert operations therefore always append a fresh pending line in that case rather than scanning pending.
 
 ### 6.3 Compaction
 
@@ -361,7 +339,7 @@ Phase 1 — Queue level (before execution):
   └── no overlap   → append WAIT line, release lock
 
 Phase 2 — Data level (during execution):
-  mmap target.dov → apply each opcode
+  read target.dov → apply each opcode
   + on existing UUID  → error
   - on missing UUID   → error
   ~ on missing UUID   → error
@@ -387,7 +365,7 @@ tsdb target.dov action.txt
     │  Am I first WAIT and no EXEC?
     │  ├─ yes → change my line to EXEC, release lock, proceed
     │  └─ no  → release lock, sleep, retry
- 7. Execute: mmap .dov, apply all actions
+ 7. Execute: read .dov, apply all actions
  8. Write target.dov.tmp → rename to target.dov
  9. flock(LOCK_EX) briefly
 10. Remove my line from .lock
@@ -480,16 +458,17 @@ fn enqueue(
 
 ## 9. Escaping
 
-The action file uses the same escaping rules as DOTSV:
+The action file uses the same escaping rules as DOTSV. Five bytes require escaping inside keys or values:
 
-| Byte   | Escaped Form | Reason                    |
-|--------|-------------|---------------------------|
-| `\n`   | `\x0A`      | Record/line delimiter     |
-| `\t`   | `\x09`      | Field delimiter           |
-| `=`    | `\x3D`      | Key-value separator       |
-| `\`    | `\\`        | Escape character itself   |
+| Byte   | Escaped Form | Reason                                  |
+|--------|-------------|------------------------------------------|
+| `\t`   | `\x09`      | Field delimiter                          |
+| `\n`   | `\x0A`      | Record/line delimiter                    |
+| `\r`   | `\x0D`      | CR — escaped to keep round-trips lossless on CRLF-prone toolchains |
+| `=`    | `\x3D`      | Key-value separator                      |
+| `\`    | `\\`        | Escape character itself                  |
 
-No additional escaping rules at the DOTSV layer. Array elements (§3.1) use a second, independent escape layer — inside an element, `"` → `\"` and `\` → `\\` — which composes cleanly with the outer DOTSV escaping.
+The null byte (`0x00`) is reserved as the patch-tombstone sentinel and is represented literally as `\x00` in patch values (§4.3); it is not part of the DOTSV escape table. No other escaping rules apply at the DOTSV layer. Array elements (§3.1) use a second, independent escape layer — inside an element, `"` → `\"` and `\` → `\\` — which composes cleanly with the outer DOTSV escaping.
 
 ---
 
@@ -560,7 +539,7 @@ tsdb data.dov batch3.txt
 
 | Goal                  | Mechanism                                                         |
 |-----------------------|-------------------------------------------------------------------|
-| Fast parsing          | 1-byte opcode dispatch + `memchr`-accelerated tab split           |
+| Fast parsing          | 1-byte opcode dispatch + `std::str::split('\t')` tab split        |
 | Zero new syntax       | Action format = DOTSV pending section; one parser for everything  |
 | Stream processing     | Line-by-line read; constant memory regardless of action file size |
 | Safe by default       | Strict mode catches conflicts; atomic write prevents corruption   |
@@ -572,13 +551,12 @@ tsdb data.dov batch3.txt
 
 ## 12. Dependencies
 
-| Crate       | Purpose                              |
-|-------------|--------------------------------------|
-| `memmap2`   | Memory-mapped file I/O               |
-| `memchr`    | SIMD-accelerated byte search         |
-| `fs2`       | Cross-platform `flock()` wrapper     |
+| Crate  | Purpose                                                  |
+|--------|----------------------------------------------------------|
+| `fs2`  | Cross-platform `flock()` wrapper for the `.dov.lock` file |
+| `rand` | Random 64-bit process identifier for queue manifest entries |
 
-Minimal dependency surface. No serde, no async runtime, no allocation-heavy parsing frameworks.
+Minimal dependency surface. No serde, no async runtime, no JSON crate (the `--records` JSONL encoder is hand-rolled), no `mmap` or `memchr` bindings — the implementation uses plain `std::fs::read` plus `BufReader` line iteration.
 
 ---
 
@@ -641,6 +619,8 @@ tsdb --plane <target.dov>
 | `<target>.kv.ptv`    | Key-value flat index — sorted by (key, value, uuid)      |
 | `<target>.vk.ptv`    | Value-key flat index — sorted by (value, key, uuid)      |
 | `<target>.uuid.ptv`  | Sorted list of all UUIDs in the database, one per line   |
+| `<target>.ord.ptv`   | Numeric companion plane index (v0.5; see §18)            |
+| `<target>.kt.ptv`    | Key-type plane index (v0.6; see §21)                     |
 
 The `kv` / `vk` files are three-column `ptsv` files with exactly one UUID per row. For a `.rtv` row whose column 3 contains *j* UUIDs, the corresponding `.ptv` produces *j* rows. The `uuid.ptv` file has identical content to `uuid.rtv` — a sorted single-column UUID list — and is emitted from `--plane` so consumers working purely in `ptsv` space do not need to cross formats.
 
@@ -661,14 +641,19 @@ A malformed canonical array value in the source `.dov` (e.g. unquoted element, t
 ### 14.3 Skip Condition
 
 ```
-skip if:
+skip if (v0.6, all five companion files current):
     kv.ptv exists
     AND vk.ptv exists
     AND uuid.ptv exists
-    AND kv.ptv last line == dov last line   (exact string match)
-    AND vk.ptv last line == dov last line
-    AND uuid.ptv last line == dov last line
+    AND ord.ptv exists
+    AND kt.ptv exists
+    AND every file's last line == dov last line   (exact string match)
 ```
+
+Any one missing or stale → all five are rewritten in lockstep. The four
+legacy bodies (`kv.ptv`, `vk.ptv`, `uuid.ptv`, `ord.ptv`) remain
+byte-identical across the v0.5→v0.6 upgrade boundary; only the new
+`*.kt.ptv` is genuinely new content.
 
 ### 14.4 Relationship to `--relate`
 
@@ -725,14 +710,17 @@ Suitable for piping into shell processing or as the basis for generating a new a
 
 ## 16. Related Formats
 
-`tsdb` defines four named input and output formats, all sharing the same UTF-8 plain-text conventions as DOTSV:
+`tsdb` defines seven named input and output formats, all sharing the same UTF-8 plain-text conventions as DOTSV:
 
-| Format | Extension | Full name                        | Role                                          | Created by      |
-|--------|-----------|----------------------------------|-----------------------------------------------|-----------------|
-| `atsv` | `*.atv`   | Action Tab Separated Vehicle     | Action file input for write operations        | User            |
-| `rtsv` | `*.rtv`   | Relation Tab Separated Vehicle   | Inverted index (UUID array in col 3)          | `tsdb --relate` |
-| `ptsv` | `*.ptv`   | Plane Tab Separated Vehicle      | Flattened inverted index (one row per UUID)   | `tsdb --plane`  |
-| `qtsv` | `*.qtv`   | Query Tab Separated Vehicle      | Query criteria input for `--query` mode       | User            |
+| Format | Extension | Full name                        | Role                                                       | Created by                    |
+|--------|-----------|----------------------------------|------------------------------------------------------------|-------------------------------|
+| `atsv` | `*.atv`   | Action Tab Separated Vehicle     | Action file input for write operations                     | User                          |
+| `rtsv` | `*.rtv`   | Relation Tab Separated Vehicle   | Inverted index (UUID array in col 3)                       | `tsdb --relate`               |
+| `ptsv` | `*.ptv`   | Plane Tab Separated Vehicle      | Flattened inverted index (one row per UUID); five companions: `kv` / `vk` / `uuid` / `ord` / `kt` | `tsdb --plane` |
+| `qtsv` | `*.qtv`   | Query Tab Separated Vehicle      | Query criteria input for `--query` mode                    | User                          |
+| `ftsv` | `*.ftv`   | Filter Tab Separated Vehicle     | Rich predicate input for `--filter` mode (v0.5; see §17)   | User                          |
+| `dtsv` | `*.dtv`   | Display Tab Separated Vehicle    | Full-record output of `--show` (v0.5; see §19)             | `tsdb --query --show` / `tsdb --filter --show` |
+| `utsv` | `*.utv`   | UUID Tab Separated Vehicle       | UUID-list input for `--records` (v0.6; see §22)            | User / `--query` / `--filter` |
 
 ### `atsv` (Action TSV)
 
@@ -947,3 +935,235 @@ The universe of UUIDs for absence resolution is read from `<stem>.uuid.rtv` (alr
 `@absent\tdone\ttrue` (in `.qtv`) returns: records without `done` ∪ records with `done` ≠ `true`.
 
 `ne done true` (in `.ftv`) returns only the second set — records that have `done` AND whose value differs. To get `@absent` semantics inside `.ftv`, compose `or\nnohas\tdone\nne\tdone\ttrue\nend`. The asymmetry is documented and pinned by tests.
+
+---
+
+## 21. `*.kt.ptv` Key-Type Plane Index (v0.6)
+
+```
+<target>.kt.ptv
+```
+
+Generated by `--plane` alongside the four existing companion files (v0.6).
+One row per `(key, type)` fact: how many records hold a given key as a
+given type, and which UUIDs they are.
+
+| Column | Meaning                                                       |
+|--------|---------------------------------------------------------------|
+| 1      | key (DOTSV-escaped, same as `kv.ptv` col 1)                    |
+| 2      | type — one of `array`, `boolean`, `number`, `string`, `timestamp` |
+| 3      | count — decimal integer ≥ 1 (number of records with this `(key, type)`) |
+| 4      | uuid-list — comma-separated, lex-sorted, no spaces             |
+
+Rows are sorted lex on `(key, type)`. The last line is a
+`# YYYYDDMMhhmmss` footer matching the source `.dov`.
+
+### 21.1 Type vocabulary (5 committed types)
+
+| Type        | Detection rule (on the unescaped value)                                                   |
+|-------------|-------------------------------------------------------------------------------------------|
+| `array`     | `escape::is_array_value` returns `true` (canonical `[…]` shape)                            |
+| `timestamp` | 14 ASCII digits AND month ∈ 01..12, day ∈ 01..31, hour ∈ 00..23, minute ∈ 00..59, sec ∈ 00..59 (year unconstrained per DOTSV §5; leap-day calendar correctness OUT OF SCOPE) |
+| `boolean`   | exactly `"true"` or `"false"` (lowercase only — `True`, `TRUE`, `1`, `yes` → not boolean) |
+| `number`    | matches `^-?\d+(\.\d+)?$` — no scientific, no hex, no leading zero except a lone `0`, no leading whitespace, no `+` prefix |
+| `string`    | default — anything else, including the empty string                                        |
+
+**Detection precedence:** `array → timestamp → boolean → number → string`.
+First match wins. The classifier lives in a single function
+(`keytype::classify`) shared with `--records` (§22), so the type token in
+`kt.ptv` col 2 always matches the JSON shape `--records` would emit for
+the same value.
+
+`object` is intentionally **NOT** in the vocabulary. The `.atv` parser
+rejects `{...}` literals at write time so the value class cannot exist
+on disk. If a future round legalises object values, adding the token
+then is non-breaking.
+
+### 21.2 Per-key-per-type rows
+
+If a key holds two types across the database (`age=30` and `age=many`),
+it appears on two rows:
+
+```
+age	number	1	NGk26cHcv001
+age	string	1	NGk26cHdn002
+```
+
+This avoids inventing a multi-type comma-and-escape sub-grammar that no
+other `tsdb` file uses, and makes `grep '^age\t' kt.ptv` return the
+type breakdown trivially.
+
+The `count` column is the record count, not the array element count. A
+record holding `roles=["a","b","c"]` adds 1 to `(roles, array)`.
+
+### 21.3 Worked example
+
+Source `.dov`:
+
+```
+NGk26cHcv001	name=Alice	age=30	roles=["admin"]
+NGk26cHdn002	name=Bob	age=many	active=true
+EGk26cICK001	name=Carol	created=20262903143022	roles=["editor","viewer"]
+```
+
+`target.kt.ptv`:
+
+```
+active	boolean	1	NGk26cHdn002
+age	number	1	NGk26cHcv001
+age	string	1	NGk26cHdn002
+created	timestamp	1	EGk26cICK001
+name	string	3	EGk26cICK001,NGk26cHcv001,NGk26cHdn002
+roles	array	2	EGk26cICK001,NGk26cHcv001
+# 20262903143022
+```
+
+---
+
+## 22. `--records` Mode and `*.utv` (v0.6)
+
+```
+tsdb --records <input.utv> <target.dov>
+tsdb --records - <target.dov>
+```
+
+Reads a UUID list (file argument or `-` for stdin) and emits one JSON
+object per line on stdout — pure JSONL, no envelope, no footer.
+
+### 22.1 Per-line shape
+
+```
+{"_uuid":"<uuid>","<k1>":<v1>,"<k2>":<v2>,...}\n
+```
+
+Member ordering:
+
+1. `_uuid` always first (a viewer scanning lines sees the identifier
+   first; shell tools can `grep '"_uuid":"NGk26'` without parsing).
+2. Remaining keys in `Record::serialize` order (raw-key lex sort, identical
+   to the on-disk `.dov` line for ASCII keys).
+3. `_missing` (sentinel-only) appears second on missing-UUID lines and
+   is the only key besides `_uuid`.
+
+The `_` prefix is reserved by `tsdb`. v0.6 documents this but does not
+enforce it at `.atv` parse time — a record with a user-defined `_uuid`
+key produces a JSON object with two `_uuid` members (RFC 8259 §4 calls
+this "behavior unpredictable"). Documented; tests pin the current
+emission so future changes are visible.
+
+### 22.2 Value typing — coerced via the shared classifier
+
+The same `classify(v)` function that fills `*.kt.ptv` (§21.1) decides the
+JSON encoding for each value:
+
+| Classified type | This record's value           | JSON encoding                                                                  |
+|-----------------|-------------------------------|--------------------------------------------------------------------------------|
+| `string`        | (default)                     | JSON string (DOTSV-unescape, then JSON-escape)                                 |
+| `array`         | canonical array               | JSON array of JSON strings (`escape::decode_array`, then JSON-escape each)     |
+| `number`        | matches `^-?\d+(\.\d+)?$`     | JSON number, emitted as raw bytes (no `f64` round-trip — `30` stays `30`, `30.50` stays `30.50`) |
+| `boolean`       | exactly `true` / `false`      | JSON literal `true` / `false`                                                  |
+| `timestamp`     | 14-digit valid timestamp      | JSON string (preserves the lexical form; consumers parse explicitly)           |
+
+Element-level classification is NOT recursive: array elements are
+always JSON strings.
+
+### 22.3 JSON string escape table (RFC 8259 §7)
+
+| Codepoint                              | Output                  |
+|----------------------------------------|-------------------------|
+| `0x22` (`"`)                           | `\"`                    |
+| `0x5C` (`\`)                           | `\\`                    |
+| `0x08`                                 | `\b`                    |
+| `0x0C`                                 | `\f`                    |
+| `0x0A`                                 | `\n`                    |
+| `0x0D`                                 | `\r`                    |
+| `0x09`                                 | `\t`                    |
+| `0x00..0x1F` (other)                   | `\u00XX` (lowercase hex)|
+| `0x20..0x21`, `0x23..0x5B`, `0x5D..0x7E` | literal byte          |
+| Multi-byte UTF-8 (≥ `0x80`)            | passed through verbatim |
+
+Forward slash `/` is intentionally **not** escaped — RFC 8259 §7 makes
+this optional.
+
+### 22.4 Missing UUIDs
+
+A UUID present in the input but absent from the database emits a
+sentinel line in input position:
+
+```
+{"_uuid":"ZZZmissing00","_missing":true}
+```
+
+This keeps input/output line correspondence so downstream `paste` /
+`awk NR==…` can align rows, and is `jq 'select(._missing | not)'`
+friendly.
+
+### 22.5 `*.utv` — UUID Tab Separated Vehicle
+
+| Property        | Value                                                            |
+|-----------------|------------------------------------------------------------------|
+| Extension       | `*.utv`                                                          |
+| Full name       | UUID Tab Separated Vehicle                                       |
+| Encoding        | UTF-8, no BOM                                                    |
+| Line ending     | `\n` only — CRLF rejected (convert with `dos2unix`)              |
+| Hand-authored?  | Yes — typically generated by `--query` / `--filter` and piped in |
+| Footer          | NONE (transient pipeline format; `cat a.utv b.utv` must concat cleanly) |
+
+Grammar:
+
+```
+utv-file  = { line }
+line      = uuid-line | comment | blank
+uuid-line = 12-char base62-Gu UUID , LF
+comment   = "#" , { any-byte except LF } , LF
+blank     = LF
+```
+
+Each non-comment, non-blank line MUST be exactly 12 valid base62-Gu
+chars (validated via `base62::validate_uuid`). Trailing whitespace on a
+UUID line, leading whitespace, BOM at file start, or CRLF line endings
+are parse errors. Comments (`#…`) and blank lines are silently skipped.
+
+The on-the-wire format is byte-compatible with `tsdb --query`'s stdout,
+so
+
+```
+tsdb --query find.qtv users.dov | tsdb --records - users.dov | jq .
+```
+
+works without `sed`.
+
+### 22.6 Concurrency
+
+`--records` acquires the empty-UUID-set lock — same shape as
+`--show`/`--query`/`--filter`/`--plane`. The lock is held through the
+stdout drain because the output is streamed (UUID lists may be 10^6
+lines; an in-memory buffer is unjustified). Concurrent invocations
+against the same `.dov` may fail at register with `LockConflict` rather
+than queue, matching v0.5 semantics for `--show`.
+
+### 22.7 Worked example
+
+Source `.dov`:
+
+```
+NGk26cHcv001	name=Alice	age=30	roles=["admin","editor"]
+EGk26cICK001	name=Carol	city=東京	emoji=🚀
+```
+
+`input.utv`:
+
+```
+NGk26cHcv001
+EGk26cICK001
+ZGk26cHcv099
+```
+
+`tsdb --records input.utv users.dov` (the third UUID is well-formed
+but absent from the database):
+
+```
+{"_uuid":"NGk26cHcv001","age":30,"name":"Alice","roles":["admin","editor"]}
+{"_uuid":"EGk26cICK001","city":"東京","emoji":"🚀","name":"Carol"}
+{"_uuid":"ZGk26cHcv099","_missing":true}
+```

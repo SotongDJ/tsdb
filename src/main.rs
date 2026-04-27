@@ -4,10 +4,12 @@ mod dotsv;
 mod error;
 mod escape;
 mod filter;
+mod keytype;
 mod lock;
 mod order;
 mod plane;
 mod query;
+mod records;
 mod relate;
 mod show;
 
@@ -28,11 +30,12 @@ fn print_usage(stream: UsageStream) {
         "  tsdb <target.dov> <action.atv>             apply actions to database",
         "  tsdb <target.dov> --compact                compact pending section",
         "  tsdb --relate <target.dov>                 generate .kv.rtv, .vk.rtv, .uuid.rtv indexes",
-        "  tsdb --plane <target.dov>                  generate .kv.ptv, .vk.ptv, .uuid.ptv, .ord.ptv indexes",
+        "  tsdb --plane <target.dov>                  generate kv.ptv, vk.ptv, uuid.ptv, ord.ptv, kt.ptv indexes",
         "  tsdb --query <query.qtv> <target.dov>      query database, print matching UUIDs",
         "  tsdb --filter <filter.ftv> <target.dov>    rich predicate filter (eq/ne/lt/.. + numeric variants)",
         "  tsdb --query  ... <target.dov> --show [<out.dtv>|-]   emit full records (stdout default; '-' alias)",
         "  tsdb --filter ... <target.dov> --show [<out.dtv>|-]   emit full records (stdout default; '-' alias)",
+        "  tsdb --records <uuids.utv|-> <target.dov>  print matching records as JSONL (one JSON object per line)",
         "  tsdb --help                                show this message",
         "  tsdb --version                             print version",
     ];
@@ -89,6 +92,21 @@ fn main() {
                 let action_path = Path::new(second_arg);
                 run_with_actions(dov_path, action_path)
             }
+        }
+        4 if args[1] == "--records" => {
+            // Form: tsdb --records <input.utv|-> <target.dov>
+            let input = &args[2];
+            // Path arguments starting with '-' (other than the lone '-'
+            // alias) are rejected — mirrors the --show convention.
+            if input != "-" && input.starts_with('-') {
+                eprintln!(
+                    "Error: --records <input.utv> path must not start with '-' (got {:?}); use '-' alone for stdin",
+                    input
+                );
+                std::process::exit(2);
+            }
+            let dov_path = Path::new(&args[3]);
+            records::run_records_mode(input, dov_path)
         }
         n if n >= 4 && (args[1] == "--query" || args[1] == "--filter") => {
             // Form: tsdb --query <qtv> <dov> [--show [<out>|-]]

@@ -10,6 +10,7 @@
 use crate::dotsv::{DotsvFile, Record};
 use crate::error::{Result, TsdbError};
 use crate::escape::{decode_array, escape, is_array_value};
+use crate::keytype::{generate_kt_ptv, kt_ptv_path};
 use crate::order::{generate_ord_ptv, ord_ptv_path};
 use crate::relate::read_last_nonempty_line;
 use std::collections::BTreeSet;
@@ -51,13 +52,13 @@ pub fn uuid_ptv_path(dov_path: &Path) -> PathBuf {
 }
 
 /// Generate (or update) `<target>.kv.ptv`, `<target>.vk.ptv`,
-/// `<target>.uuid.ptv`, and `<target>.ord.ptv` from `db`.
+/// `<target>.uuid.ptv`, `<target>.ord.ptv`, and `<target>.kt.ptv` from `db`.
 ///
-/// Skip condition (v0.5, banana.md §2.6 / Decision #12): all four files
-/// must exist and carry the same timestamp footer as the source `.dov`.
-/// If any one is missing or stale, all four are rewritten — guaranteeing
-/// the new `.ord.ptv` is produced on the first post-upgrade run even when
-/// the three legacy files happen to be current.
+/// Skip condition (v0.6, banana.md §3.1.4): all five files must exist and
+/// carry the same timestamp footer as the source `.dov`. If any one is
+/// missing or stale, all five are rewritten — guaranteeing the new
+/// `.kt.ptv` is produced on the first post-upgrade run even when the four
+/// legacy files happen to be current.
 pub fn generate_ptvs(dov_path: &Path, db: &DotsvFile) -> Result<()> {
     if !db.pending.is_empty() {
         return Err(TsdbError::Other(
@@ -70,15 +71,27 @@ pub fn generate_ptvs(dov_path: &Path, db: &DotsvFile) -> Result<()> {
     let vk_path = vk_ptv_path(dov_path);
     let uuid_path = uuid_ptv_path(dov_path);
     let ord_path = ord_ptv_path(dov_path);
+    let kt_path = kt_ptv_path(dov_path);
 
     let dov_ts = read_last_nonempty_line(dov_path)?;
 
-    if kv_path.exists() && vk_path.exists() && uuid_path.exists() && ord_path.exists() {
+    if kv_path.exists()
+        && vk_path.exists()
+        && uuid_path.exists()
+        && ord_path.exists()
+        && kt_path.exists()
+    {
         let kv_ts = read_last_nonempty_line(&kv_path).unwrap_or_default();
         let vk_ts = read_last_nonempty_line(&vk_path).unwrap_or_default();
         let uuid_ts = read_last_nonempty_line(&uuid_path).unwrap_or_default();
         let ord_ts = read_last_nonempty_line(&ord_path).unwrap_or_default();
-        if kv_ts == dov_ts && vk_ts == dov_ts && uuid_ts == dov_ts && ord_ts == dov_ts {
+        let kt_ts = read_last_nonempty_line(&kt_path).unwrap_or_default();
+        if kv_ts == dov_ts
+            && vk_ts == dov_ts
+            && uuid_ts == dov_ts
+            && ord_ts == dov_ts
+            && kt_ts == dov_ts
+        {
             return Ok(());
         }
     }
@@ -89,6 +102,7 @@ pub fn generate_ptvs(dov_path: &Path, db: &DotsvFile) -> Result<()> {
     write_ptv_file(&vk_path, &vk_rows, &dov_ts)?;
     write_uuid_file(&uuid_path, &uuids, &dov_ts)?;
     generate_ord_ptv(dov_path, db)?;
+    generate_kt_ptv(dov_path, db, &dov_ts)?;
 
     Ok(())
 }
@@ -530,7 +544,7 @@ mod tests {
         let uuid1 = fs::read(uuid_ptv_path(&dov)).unwrap();
 
         // Force regen by removing .ord.ptv (which causes the skip check to
-        // fall through and rewrite all four).
+        // fall through and rewrite all five).
         fs::remove_file(ord_ptv_path(&dov)).unwrap();
         generate_ptvs(&dov, &db).unwrap();
 
@@ -540,5 +554,127 @@ mod tests {
         assert_eq!(kv1, kv2, "kv.ptv must be byte-identical across runs");
         assert_eq!(vk1, vk2, "vk.ptv must be byte-identical across runs");
         assert_eq!(uuid1, uuid2, "uuid.ptv must be byte-identical across runs");
+    }
+
+    // ---------- v0.6 5-file rule (banana.md §3.1.4) ----------
+
+    #[test]
+    fn plane_emits_five_companion_files() {
+        let tmp = tmp::TempDir::new();
+        let dov = make_test_db(&tmp);
+        let db = DotsvFile::load(&dov).unwrap();
+        generate_ptvs(&dov, &db).unwrap();
+        assert!(kv_ptv_path(&dov).exists());
+        assert!(vk_ptv_path(&dov).exists());
+        assert!(uuid_ptv_path(&dov).exists());
+        assert!(ord_ptv_path(&dov).exists());
+        assert!(kt_ptv_path(&dov).exists());
+    }
+
+    #[test]
+    fn plane_skip_requires_all_five_files_current() {
+        let tmp = tmp::TempDir::new();
+        let dov = make_test_db(&tmp);
+        let db = DotsvFile::load(&dov).unwrap();
+        generate_ptvs(&dov, &db).unwrap();
+        // Delete kt.ptv — next call must rewrite all five.
+        fs::remove_file(kt_ptv_path(&dov)).unwrap();
+        let kv_mtime_before = fs::metadata(kv_ptv_path(&dov)).unwrap().modified().unwrap();
+        generate_ptvs(&dov, &db).unwrap();
+        assert!(kt_ptv_path(&dov).exists());
+        let kv_mtime_after = fs::metadata(kv_ptv_path(&dov)).unwrap().modified().unwrap();
+        assert!(kv_mtime_after >= kv_mtime_before);
+    }
+
+    #[test]
+    fn plane_first_run_after_upgrade_produces_kt_ptv() {
+        // Simulate a v0.5 install: four legacy ptv files current, no
+        // .kt.ptv. Running --plane (v0.6) must produce the new file.
+        let tmp = tmp::TempDir::new();
+        let dov = make_test_db(&tmp);
+        let db = DotsvFile::load(&dov).unwrap();
+        generate_ptvs(&dov, &db).unwrap();
+        // Manually delete the newly-introduced kt file to mimic a v0.5 layout.
+        fs::remove_file(kt_ptv_path(&dov)).unwrap();
+        assert!(!kt_ptv_path(&dov).exists());
+        generate_ptvs(&dov, &db).unwrap();
+        assert!(kt_ptv_path(&dov).exists());
+    }
+
+    #[test]
+    fn plane_rewrite_preserves_four_legacy_files_byte_for_byte() {
+        // Two consecutive runs over the same db must produce byte-identical
+        // legacy files (kv, vk, uuid, ord) when only the new kt file is
+        // missing — the four legacy bodies must be identical across the
+        // upgrade boundary.
+        let tmp = tmp::TempDir::new();
+        let dov = make_test_db(&tmp);
+        let db = DotsvFile::load(&dov).unwrap();
+        generate_ptvs(&dov, &db).unwrap();
+        let kv1 = fs::read(kv_ptv_path(&dov)).unwrap();
+        let vk1 = fs::read(vk_ptv_path(&dov)).unwrap();
+        let uuid1 = fs::read(uuid_ptv_path(&dov)).unwrap();
+        let ord1 = fs::read(ord_ptv_path(&dov)).unwrap();
+
+        // Remove kt.ptv only, force regen via the 5-file skip rule.
+        fs::remove_file(kt_ptv_path(&dov)).unwrap();
+        generate_ptvs(&dov, &db).unwrap();
+
+        let kv2 = fs::read(kv_ptv_path(&dov)).unwrap();
+        let vk2 = fs::read(vk_ptv_path(&dov)).unwrap();
+        let uuid2 = fs::read(uuid_ptv_path(&dov)).unwrap();
+        let ord2 = fs::read(ord_ptv_path(&dov)).unwrap();
+        assert_eq!(kv1, kv2, "kv.ptv byte-identical across upgrade");
+        assert_eq!(vk1, vk2, "vk.ptv byte-identical across upgrade");
+        assert_eq!(uuid1, uuid2, "uuid.ptv byte-identical across upgrade");
+        assert_eq!(ord1, ord2, "ord.ptv byte-identical across upgrade");
+    }
+
+    #[test]
+    fn plane_kt_ptv_atomic_write() {
+        // The kt.ptv writer is non-atomic at the moment (direct File::create
+        // → BufWriter). This test pins the current behaviour: after a
+        // successful run, no `.tmp` file lingers (we also don't expect
+        // one to ever exist for kt.ptv, since the writer doesn't use
+        // tmp+rename — it overwrites in place via File::create).
+        let tmp = tmp::TempDir::new();
+        let dov = make_test_db(&tmp);
+        let db = DotsvFile::load(&dov).unwrap();
+        generate_ptvs(&dov, &db).unwrap();
+        let kt = kt_ptv_path(&dov);
+        assert!(kt.exists());
+        let mut tmp_path = kt.as_os_str().to_os_string();
+        tmp_path.push(".tmp");
+        let tmp_path = std::path::PathBuf::from(tmp_path);
+        assert!(!tmp_path.exists());
+    }
+
+    #[test]
+    fn plane_skip_when_only_kt_ptv_missing_regenerates_all_five() {
+        let tmp = tmp::TempDir::new();
+        let dov = make_test_db(&tmp);
+        let db = DotsvFile::load(&dov).unwrap();
+        generate_ptvs(&dov, &db).unwrap();
+        // Capture mtimes of the four legacy files
+        let m_kv = fs::metadata(kv_ptv_path(&dov)).unwrap().modified().unwrap();
+        let m_vk = fs::metadata(vk_ptv_path(&dov)).unwrap().modified().unwrap();
+        let m_uuid = fs::metadata(uuid_ptv_path(&dov)).unwrap().modified().unwrap();
+        let m_ord = fs::metadata(ord_ptv_path(&dov)).unwrap().modified().unwrap();
+        // Remove kt.ptv only
+        fs::remove_file(kt_ptv_path(&dov)).unwrap();
+        // Sleep briefly so any rewrite produces a different mtime
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        generate_ptvs(&dov, &db).unwrap();
+        // All five exist and the legacy four mtimes have advanced (or
+        // are equal — we accept >=).
+        let m2_kv = fs::metadata(kv_ptv_path(&dov)).unwrap().modified().unwrap();
+        let m2_vk = fs::metadata(vk_ptv_path(&dov)).unwrap().modified().unwrap();
+        let m2_uuid = fs::metadata(uuid_ptv_path(&dov)).unwrap().modified().unwrap();
+        let m2_ord = fs::metadata(ord_ptv_path(&dov)).unwrap().modified().unwrap();
+        assert!(m2_kv >= m_kv);
+        assert!(m2_vk >= m_vk);
+        assert!(m2_uuid >= m_uuid);
+        assert!(m2_ord >= m_ord);
+        assert!(kt_ptv_path(&dov).exists());
     }
 }

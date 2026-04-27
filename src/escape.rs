@@ -1,8 +1,9 @@
 /// DOTSV escaping/unescaping.
 ///
-/// The four bytes that must be escaped inside keys and values:
+/// The five bytes that must be escaped inside keys and values:
 ///   \t  (0x09) → \x09
 ///   \n  (0x0A) → \x0A
+///   \r  (0x0D) → \x0D
 ///   =   (0x3D) → \x3D   (inside values only; keys may not contain = either)
 ///   \   (0x5C) → \\
 ///

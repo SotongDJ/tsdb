@@ -29,6 +29,7 @@
 use crate::dotsv::{DotsvFile, Record};
 use crate::error::{Result, TsdbError};
 use crate::escape::{decode_array, escape, is_array_value};
+use crate::keytype::is_numeric_shape;
 use crate::relate::read_last_nonempty_line;
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -46,53 +47,11 @@ pub fn ord_ptv_path(dov_path: &Path) -> PathBuf {
     dov_path.with_file_name(format!("{}.ord.ptv", stem))
 }
 
-/// Validate-shape: the value must match `^-?\d+(\.\d+)?$`. Hex, scientific
-/// notation, leading zeros (except a single 0), leading whitespace, and
-/// `+` sign are NOT numeric for the purposes of `norm`.
-fn is_numeric_shape(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
-        return false;
-    }
-    let mut i = 0;
-    if bytes[0] == b'-' {
-        if bytes.len() == 1 {
-            return false;
-        }
-        i = 1;
-    }
-    let int_start = i;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i == int_start {
-        return false; // no integer digits
-    }
-    let int_len = i - int_start;
-    // Reject leading zeros except a lone "0" (e.g. "007", "0.5" allowed,
-    // "0" allowed, "00" rejected).
-    if int_len > 1 && bytes[int_start] == b'0' {
-        return false;
-    }
-    if i == bytes.len() {
-        return true;
-    }
-    if bytes[i] != b'.' {
-        return false;
-    }
-    i += 1;
-    let frac_start = i;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i != bytes.len() || i == frac_start {
-        return false;
-    }
-    true
-}
-
 /// Encode a numeric string into `norm`. Returns `None` if `s` is not
-/// numeric per `is_numeric_shape`.
+/// numeric per `keytype::is_numeric_shape` (single source-of-truth —
+/// Pie finding 2; the predicate now lives in `src/keytype.rs` and is
+/// shared between `--plane`'s numeric ordering and the v0.6 type
+/// classifier).
 pub fn encode_norm(s: &str) -> Option<String> {
     if !is_numeric_shape(s) {
         return None;
