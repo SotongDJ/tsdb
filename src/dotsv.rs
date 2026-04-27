@@ -9,7 +9,6 @@
 /// Pending section: opcode-prefixed lines (+/-/~) acting as a write-ahead log.
 ///
 /// When pending section exceeds 100 lines → compact (merge pass → tmp → rename).
-
 use crate::action::{parse_kv_fields, Action, Opcode};
 use crate::error::{Result, TsdbError};
 use crate::escape::escape;
@@ -384,11 +383,7 @@ fn apply_single_action(db: &mut DotsvFile, action: &Action) -> Result<()> {
                     let new_serialized = rec.serialize();
                     if new_serialized.len() <= old_line.len() {
                         // In-place overwrite: pad with spaces before newline
-                        let padded = format!(
-                            "{:width$}",
-                            new_serialized,
-                            width = old_line.len()
-                        );
+                        let padded = format!("{:width$}", new_serialized, width = old_line.len());
                         db.sorted[idx] = padded;
                     } else {
                         // Append to pending
@@ -428,11 +423,7 @@ fn apply_single_action(db: &mut DotsvFile, action: &Action) -> Result<()> {
                     let old_line = &db.sorted[idx];
                     let new_serialized = rec.serialize();
                     if new_serialized.len() <= old_line.len() {
-                        let padded = format!(
-                            "{:width$}",
-                            new_serialized,
-                            width = old_line.len()
-                        );
+                        let padded = format!("{:width$}", new_serialized, width = old_line.len());
                         db.sorted[idx] = padded;
                     } else {
                         db.pending.push(format!("+{}", rec.serialize()));
@@ -458,8 +449,8 @@ pub fn validate_actions(db: &DotsvFile, actions: &[Action]) -> Result<()> {
 
     for action in actions {
         let uuid = &action.uuid;
-        let currently_exists = (db.uuid_exists(uuid) || added.contains(uuid))
-            && !deleted.contains(uuid);
+        let currently_exists =
+            (db.uuid_exists(uuid) || added.contains(uuid)) && !deleted.contains(uuid);
 
         match action.opcode {
             Opcode::Append => {
@@ -619,8 +610,7 @@ mod tests {
     #[test]
     fn test_append_then_exists() {
         let mut db = DotsvFile::empty();
-        let actions =
-            parse_action_str(&format!("+{}\tname=Alice\n", GOOD_UUID1)).unwrap();
+        let actions = parse_action_str(&format!("+{}\tname=Alice\n", GOOD_UUID1)).unwrap();
         apply_actions(&mut db, &actions).unwrap();
         assert!(db.uuid_exists(GOOD_UUID1));
     }
@@ -628,8 +618,7 @@ mod tests {
     #[test]
     fn test_append_duplicate_error() {
         let mut db = make_db_with(&[(GOOD_UUID1, &[("name", "Alice")])]);
-        let actions =
-            parse_action_str(&format!("+{}\tname=Bob\n", GOOD_UUID1)).unwrap();
+        let actions = parse_action_str(&format!("+{}\tname=Bob\n", GOOD_UUID1)).unwrap();
         assert!(apply_actions(&mut db, &actions).is_err());
     }
 
@@ -651,8 +640,7 @@ mod tests {
     #[test]
     fn test_patch_updates_field() {
         let mut db = make_db_with(&[(GOOD_UUID1, &[("name", "Alice"), ("age", "30")])]);
-        let actions =
-            parse_action_str(&format!("~{}\tname=Bob\n", GOOD_UUID1)).unwrap();
+        let actions = parse_action_str(&format!("~{}\tname=Bob\n", GOOD_UUID1)).unwrap();
         apply_actions(&mut db, &actions).unwrap();
         // Compact to check final state
         db.compact().unwrap();
@@ -664,8 +652,7 @@ mod tests {
     #[test]
     fn test_patch_delete_key() {
         let mut db = make_db_with(&[(GOOD_UUID1, &[("name", "Alice"), ("tmp", "x")])]);
-        let actions =
-            parse_action_str(&format!("~{}\ttmp=\\x00\n", GOOD_UUID1)).unwrap();
+        let actions = parse_action_str(&format!("~{}\ttmp=\\x00\n", GOOD_UUID1)).unwrap();
         apply_actions(&mut db, &actions).unwrap();
         db.compact().unwrap();
         let rec = Record::parse(&db.sorted[0], 1).unwrap();
@@ -675,8 +662,7 @@ mod tests {
     #[test]
     fn test_upsert_insert() {
         let mut db = DotsvFile::empty();
-        let actions =
-            parse_action_str(&format!("!{}\tname=Alice\n", GOOD_UUID1)).unwrap();
+        let actions = parse_action_str(&format!("!{}\tname=Alice\n", GOOD_UUID1)).unwrap();
         apply_actions(&mut db, &actions).unwrap();
         assert!(db.uuid_exists(GOOD_UUID1));
     }
@@ -684,8 +670,7 @@ mod tests {
     #[test]
     fn test_compact_clears_pending() {
         let mut db = DotsvFile::empty();
-        let actions =
-            parse_action_str(&format!("+{}\tname=Alice\n", GOOD_UUID1)).unwrap();
+        let actions = parse_action_str(&format!("+{}\tname=Alice\n", GOOD_UUID1)).unwrap();
         apply_actions(&mut db, &actions).unwrap();
         assert!(!db.pending.is_empty());
         db.compact().unwrap();
@@ -738,8 +723,7 @@ mod tests {
         // the result would have no fields, violating the invariant that every
         // record must have at least one KV pair.
         let mut db = make_db_with(&[(GOOD_UUID1, &[("name", "Alice")])]);
-        let actions =
-            parse_action_str(&format!("~{}\tname=\\x00\n", GOOD_UUID1)).unwrap();
+        let actions = parse_action_str(&format!("~{}\tname=\\x00\n", GOOD_UUID1)).unwrap();
         let result = apply_actions(&mut db, &actions);
         assert!(
             result.is_err(),

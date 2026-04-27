@@ -7,7 +7,6 @@
 ///   -<uuid>            Delete: remove; error if UUID missing
 ///   ~<uuid>\t<kv>...   Patch: update KV pairs; error if UUID missing
 ///   !<uuid>\t<kv>...   Upsert: insert or replace; never errors
-
 use crate::base62::validate_uuid;
 use crate::error::{Result, TsdbError};
 use std::collections::HashMap;
@@ -264,7 +263,10 @@ fn find_unescaped_equals(s: &str, line_no: usize) -> Result<Option<usize>> {
             // skip escape sequence
             if i + 1 < bytes.len() {
                 match bytes[i + 1] {
-                    b'\\' => { i += 2; continue; }
+                    b'\\' => {
+                        i += 2;
+                        continue;
+                    }
                     b'x' => {
                         // Validate that the next two chars are valid hex
                         if i + 3 >= bytes.len() {
@@ -290,7 +292,10 @@ fn find_unescaped_equals(s: &str, line_no: usize) -> Result<Option<usize>> {
                         i += 4;
                         continue;
                     }
-                    _ => { i += 2; continue; }
+                    _ => {
+                        i += 2;
+                        continue;
+                    }
                 }
             }
         }

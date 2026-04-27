@@ -3,10 +3,13 @@ mod base62;
 mod dotsv;
 mod error;
 mod escape;
+mod filter;
 mod lock;
+mod order;
 mod plane;
 mod query;
 mod relate;
+mod show;
 
 use action::{collect_uuids, parse_action_file};
 use dotsv::{apply_actions, atomic_write, maybe_compact, validate_actions, DotsvFile};
@@ -17,26 +20,66 @@ use std::time::{Duration, Instant};
 
 const REFRESH_INTERVAL_SECS: u64 = 5;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn print_usage(stream: UsageStream) {
+    let lines = [
+        "Usage:",
+        "  tsdb <target.dov> <action.atv>             apply actions to database",
+        "  tsdb <target.dov> --compact                compact pending section",
+        "  tsdb --relate <target.dov>                 generate .kv.rtv, .vk.rtv, .uuid.rtv indexes",
+        "  tsdb --plane <target.dov>                  generate .kv.ptv, .vk.ptv, .uuid.ptv, .ord.ptv indexes",
+        "  tsdb --query <query.qtv> <target.dov>      query database, print matching UUIDs",
+        "  tsdb --filter <filter.ftv> <target.dov>    rich predicate filter (eq/ne/lt/.. + numeric variants)",
+        "  tsdb --query  ... <target.dov> --show [<out.dtv>|-]   emit full records (stdout default; '-' alias)",
+        "  tsdb --filter ... <target.dov> --show [<out.dtv>|-]   emit full records (stdout default; '-' alias)",
+        "  tsdb --help                                show this message",
+        "  tsdb --version                             print version",
+    ];
+    match stream {
+        UsageStream::Stdout => {
+            for l in lines {
+                println!("{}", l);
+            }
+        }
+        UsageStream::Stderr => {
+            for l in lines {
+                eprintln!("{}", l);
+            }
+        }
+    }
+}
+
+enum UsageStream {
+    Stdout,
+    Stderr,
+}
+
 fn usage() -> ! {
-    eprintln!("Usage:");
-    eprintln!("  tsdb <target.dov> <action.atv>   apply actions to database");
-    eprintln!("  tsdb <target.dov> --compact       compact pending section");
-    eprintln!("  tsdb --relate <target.dov>        generate .kv.rtv and .vk.rtv indexes");
-    eprintln!("  tsdb --plane <target.dov>         generate .kv.ptv and .vk.ptv (flattened) indexes");
-    eprintln!("  tsdb --query <query.qtv> <target.dov>  query database, print matching UUIDs");
+    print_usage(UsageStream::Stderr);
     std::process::exit(2);
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
+    // Special short-arg forms first.
     let result = match args.len() {
-        3 if args[1] == "--relate" => {
-            run_relate_mode(Path::new(&args[2]))
+        1 => {
+            print_usage(UsageStream::Stdout);
+            std::process::exit(0);
         }
-        3 if args[1] == "--plane" => {
-            run_plane_mode(Path::new(&args[2]))
+        2 if args[1] == "--version" || args[1] == "-V" => {
+            println!("tsdb {}", VERSION);
+            std::process::exit(0);
         }
+        2 if args[1] == "--help" || args[1] == "-h" => {
+            print_usage(UsageStream::Stdout);
+            std::process::exit(0);
+        }
+        3 if args[1] == "--relate" => run_relate_mode(Path::new(&args[2])),
+        3 if args[1] == "--plane" => run_plane_mode(Path::new(&args[2])),
+        3 if args[1] == "--compact" => run_compact_only(Path::new(&args[2])),
         3 => {
             let dov_path = Path::new(&args[1]);
             let second_arg = &args[2];
@@ -47,10 +90,40 @@ fn main() {
                 run_with_actions(dov_path, action_path)
             }
         }
-        4 if args[1] == "--query" => {
-            let qtv_path = Path::new(&args[2]);
+        n if n >= 4 && (args[1] == "--query" || args[1] == "--filter") => {
+            // Form: tsdb --query <qtv> <dov> [--show [<out>|-]]
+            //       tsdb --filter <ftv> <dov> [--show [<out>|-]]
+            let is_query = args[1] == "--query";
+            let crit_path = Path::new(&args[2]);
             let dov_path = Path::new(&args[3]);
-            run_query_mode(qtv_path, dov_path)
+            // Optional --show suffix.
+            let show_target: Option<show::ShowTarget> = match args.len() {
+                4 => None,
+                5 if args[4] == "--show" => Some(show::ShowTarget::Stdout),
+                6 if args[4] == "--show" => {
+                    let path_arg = &args[5];
+                    if path_arg == "-" {
+                        Some(show::ShowTarget::Stdout)
+                    } else if path_arg.starts_with('-') {
+                        // Paths beginning with '-' (other than the lone '-'
+                        // alias) are not supported (banana.md §1.1 + Pie's
+                        // findings: documented behaviour).
+                        eprintln!(
+                            "Error: --show <out.dtv> path must not start with '-' (got {:?}); use '-' alone for stdout",
+                            path_arg
+                        );
+                        std::process::exit(2);
+                    } else {
+                        Some(show::ShowTarget::File(std::path::PathBuf::from(path_arg)))
+                    }
+                }
+                _ => usage(),
+            };
+            if is_query {
+                run_query_show_mode(crit_path, dov_path, show_target)
+            } else {
+                run_filter_mode(crit_path, dov_path, show_target)
+            }
         }
         _ => usage(),
     };
@@ -94,20 +167,25 @@ fn run_relate_mode(dov_path: &Path) -> Result<()> {
     lock_mgr.register()?;
     lock_mgr.wait_for_exec()?;
 
-    let result: Result<()> = (|| {
-        let mut db = DotsvFile::load(dov_path)?;
-        db.compact()?;
-        atomic_write(&db, dov_path)?;
-        // Re-load to get the exact state that was written (including timestamp).
-        let db = DotsvFile::load(dov_path)?;
-        relate::generate_rtvs(dov_path, &db)?;
-        eprintln!("Related: {}", dov_path.display());
-        Ok(())
-    })();
+    let result = run_relate_locked(dov_path);
 
     let release_result = lock_mgr.release();
     result?;
     release_result?;
+    Ok(())
+}
+
+/// Inner relate: assumes the caller already holds the empty-UUID-set lock.
+/// Used directly by composite modes (`--query`, `--filter`, `--show`) so a
+/// single lock acquisition covers compact + auto-relate + auto-plane + read.
+pub(crate) fn run_relate_locked(dov_path: &Path) -> Result<()> {
+    let mut db = DotsvFile::load(dov_path)?;
+    db.compact()?;
+    atomic_write(&db, dov_path)?;
+    // Re-load to get the exact state that was written (including timestamp).
+    let db = DotsvFile::load(dov_path)?;
+    relate::generate_rtvs(dov_path, &db)?;
+    eprintln!("Related: {}", dov_path.display());
     Ok(())
 }
 
@@ -123,14 +201,62 @@ fn run_plane_mode(dov_path: &Path) -> Result<()> {
     lock_mgr.register()?;
     lock_mgr.wait_for_exec()?;
 
-    let result: Result<()> = (|| {
-        let mut db = DotsvFile::load(dov_path)?;
-        db.compact()?;
-        atomic_write(&db, dov_path)?;
-        let db = DotsvFile::load(dov_path)?;
-        plane::generate_ptvs(dov_path, &db)?;
-        eprintln!("Planed: {}", dov_path.display());
-        Ok(())
+    let result = run_plane_locked(dov_path);
+
+    let release_result = lock_mgr.release();
+    result?;
+    release_result?;
+    Ok(())
+}
+
+/// Inner plane: assumes the caller already holds the empty-UUID-set lock.
+pub(crate) fn run_plane_locked(dov_path: &Path) -> Result<()> {
+    let mut db = DotsvFile::load(dov_path)?;
+    db.compact()?;
+    atomic_write(&db, dov_path)?;
+    let db = DotsvFile::load(dov_path)?;
+    plane::generate_ptvs(dov_path, &db)?;
+    eprintln!("Planed: {}", dov_path.display());
+    Ok(())
+}
+
+/// Legacy `--query` (no `--show`): UUIDs to stdout. Kept for
+/// byte-identical regression behaviour when `--show` is absent.
+fn run_query_show_mode(
+    qtv_path: &Path,
+    dov_path: &Path,
+    show_target: Option<show::ShowTarget>,
+) -> Result<()> {
+    if !dov_path.exists() {
+        return Err(TsdbError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("database file not found: {}", dov_path.display()),
+        )));
+    }
+    if !qtv_path.exists() {
+        return Err(TsdbError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("query file not found: {}", qtv_path.display()),
+        )));
+    }
+
+    let lock_mgr = LockManager::new(dov_path, Vec::new());
+    lock_mgr.register()?;
+    lock_mgr.wait_for_exec()?;
+
+    let result = (|| -> Result<()> {
+        run_relate_locked(dov_path)?;
+        match show_target {
+            None => {
+                // Legacy v0.5 path: UUIDs only.
+                query::run_query(qtv_path, dov_path)
+            }
+            Some(target) => {
+                // Resolve UUIDs in-process so we can pull full records.
+                let uuids = query::resolve_query_uuids(qtv_path, dov_path)?;
+                emit_show(uuids, dov_path, qtv_path, &target)
+            }
+        }
     })();
 
     let release_result = lock_mgr.release();
@@ -139,10 +265,78 @@ fn run_plane_mode(dov_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_query_mode(qtv_path: &Path, dov_path: &Path) -> Result<()> {
-    // Auto-relate (compact + index generation) before querying.
-    run_relate_mode(dov_path)?;
-    query::run_query(qtv_path, dov_path)
+/// `--filter` (with optional `--show`).
+fn run_filter_mode(
+    ftv_path: &Path,
+    dov_path: &Path,
+    show_target: Option<show::ShowTarget>,
+) -> Result<()> {
+    if !dov_path.exists() {
+        return Err(TsdbError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("database file not found: {}", dov_path.display()),
+        )));
+    }
+    if !ftv_path.exists() {
+        return Err(TsdbError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("filter file not found: {}", ftv_path.display()),
+        )));
+    }
+
+    let lock_mgr = LockManager::new(dov_path, Vec::new());
+    lock_mgr.register()?;
+    lock_mgr.wait_for_exec()?;
+
+    let result = (|| -> Result<()> {
+        run_relate_locked(dov_path)?;
+        run_plane_locked(dov_path)?;
+        let uuids = filter::run_filter(ftv_path, dov_path)?;
+        match show_target {
+            None => {
+                for u in &uuids {
+                    println!("{}", u);
+                }
+                Ok(())
+            }
+            Some(target) => emit_show(uuids, dov_path, ftv_path, &target),
+        }
+    })();
+
+    let release_result = lock_mgr.release();
+    result?;
+    release_result?;
+    Ok(())
+}
+
+/// Resolve a list of UUIDs to full records and emit per `target`.
+/// Caller must already hold the lock (when `target` is `File`, the write
+/// happens before the lock is released; stdout writes happen inside this
+/// function but data is already in memory so that's also race-safe).
+fn emit_show(
+    uuids: Vec<String>,
+    dov_path: &Path,
+    criterion_path: &Path,
+    target: &show::ShowTarget,
+) -> Result<()> {
+    let footer = relate::read_last_nonempty_line(dov_path)?;
+    if let show::ShowTarget::File(out) = target {
+        if show::dtv_skip_if_current(out, dov_path, criterion_path)? {
+            eprintln!("skipped: {} already current", out.display());
+            return Ok(());
+        }
+    }
+    let db = DotsvFile::load(dov_path)?;
+    let lines = show::collect_record_lines(&uuids, &db)?;
+    match target {
+        show::ShowTarget::Stdout => {
+            show::emit_to_stdout(&lines, &footer);
+        }
+        show::ShowTarget::File(out) => {
+            show::write_dtv_file(out, &lines, &footer)?;
+        }
+    }
+    Ok(())
 }
 
 fn run_with_actions(dov_path: &Path, action_path: &Path) -> Result<()> {
@@ -231,10 +425,8 @@ mod tests {
 
         impl TempDir {
             pub fn new() -> Self {
-                let path = std::env::temp_dir().join(format!(
-                    "tsdb_test_{:016x}",
-                    rand::random::<u64>()
-                ));
+                let path =
+                    std::env::temp_dir().join(format!("tsdb_test_{:016x}", rand::random::<u64>()));
                 std::fs::create_dir_all(&path).unwrap();
                 TempDir { path }
             }

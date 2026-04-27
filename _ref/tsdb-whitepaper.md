@@ -1,6 +1,6 @@
 # tsdb — The DOTSV Database Runner
 
-**Version:** 0.1 Draft
+**Version:** 0.5
 **Binary:** `tsdb`
 **Usage:** `tsdb <target.dov> <action.txt>`
 
@@ -9,6 +9,7 @@
 - 0.2 — --relate and --query modes; atsv/rtsv/qtsv format support; timestamp tracking
 - 0.3 — --plane mode; ptsv (plane inverted-index) format
 - 0.4 — array values via repeated keys; `--plane` expands arrays into per-element rows
+- 0.5 — `--relate` / `--plane` also emit a `uuid.rtv` / `uuid.ptv` sorted UUID list; `--version` / `--help` flags; `--show` full-record output (`.dtv`); `--filter` mode with comparison operators (`.ftv`); `.ord.ptv` numeric companion plane index (extends `--plane`); `@present` / `@absent` directives in `.qtv`
 
 ---
 
@@ -32,15 +33,23 @@ tsdb --compact <target.dov>
 tsdb --relate <target.dov>
 tsdb --plane <target.dov>
 tsdb --query <query.qtv> <target.dov>
+tsdb --query <query.qtv> <target.dov> --show [<out.dtv>|-]
+tsdb --filter <filter.ftv> <target.dov>
+tsdb --filter <filter.ftv> <target.dov> --show [<out.dtv>|-]
 ```
 
-| Form                                     | Description                                             |
-|------------------------------------------|---------------------------------------------------------|
-| `tsdb <target.dov> <action.atv>`         | Apply operations from an action file to the database    |
-| `tsdb --compact <target.dov>`            | Merge the pending section into the sorted section       |
-| `tsdb --relate <target.dov>`             | Generate (or refresh) the `kv.rtv` / `vk.rtv` indexes   |
-| `tsdb --plane <target.dov>`              | Generate (or refresh) the `kv.ptv` / `vk.ptv` indexes   |
-| `tsdb --query <query.qtv> <target.dov>`  | Run filter criteria against the indexes; print UUIDs    |
+| Form                                                                    | Description                                                                     |
+|-------------------------------------------------------------------------|---------------------------------------------------------------------------------|
+| `tsdb <target.dov> <action.atv>`                                        | Apply operations from an action file to the database                            |
+| `tsdb --compact <target.dov>`                                           | Merge the pending section into the sorted section                               |
+| `tsdb --relate <target.dov>`                                            | Generate `kv.rtv`, `vk.rtv`, and `uuid.rtv` indexes                              |
+| `tsdb --plane <target.dov>`                                             | Generate `kv.ptv`, `vk.ptv`, `uuid.ptv`, and `ord.ptv` indexes (v0.5)            |
+| `tsdb --query <query.qtv> <target.dov>`                                 | Run filter criteria against the indexes; print UUIDs                            |
+| `tsdb --query <query.qtv> <target.dov> --show [<out.dtv>\|-]`           | (v0.5) Emit full records (stdout default; `-` alias; `<out.dtv>` writes a file) |
+| `tsdb --filter <filter.ftv> <target.dov>`                               | (v0.5) Rich predicate filter; print matching UUIDs                              |
+| `tsdb --filter <filter.ftv> <target.dov> --show [<out.dtv>\|-]`         | (v0.5) Rich predicate filter; emit full records                                 |
+| `tsdb --version`                                                        | Print the tsdb version and exit                                                  |
+| `tsdb --help`                                                           | Print the usage message and exit                                                 |
 
 For standard write mode, `tsdb` reads `target.dov` via `mmap`, streams `action.atv` line-by-line, applies each operation, and writes the result back to `target.dov`. Action files may use the `.atv` extension or any other name; the format is identified by content, not extension.
 
@@ -579,25 +588,27 @@ Minimal dependency surface. No serde, no async runtime, no allocation-heavy pars
 tsdb --relate <target.dov>
 ```
 
-`--relate` generates a pair of inverted-index files (`rtsv` format) from a `.dov` database. These indexes allow O(log n) lookup of UUIDs by key, value, or key+value pair — without a full scan of the `.dov` file.
+`--relate` generates a triple of inverted-index files (`rtsv` format) from a `.dov` database. These indexes allow O(log n) lookup of UUIDs by key, value, or key+value pair — without a full scan of the `.dov` file.
 
 ### 13.1 Output Files
 
-| File                  | Description                          |
-|-----------------------|--------------------------------------|
-| `<target>.kv.rtv`    | Key-value index — sorted by (key, value)   |
-| `<target>.vk.rtv`    | Value-key index — sorted by (value, key)   |
+| File                  | Description                                                   |
+|-----------------------|---------------------------------------------------------------|
+| `<target>.kv.rtv`    | Key-value index — sorted by (key, value)                       |
+| `<target>.vk.rtv`    | Value-key index — sorted by (value, key)                       |
+| `<target>.uuid.rtv`  | Sorted list of all UUIDs in the database, one per line         |
 
-Each file is a flat three-column `rtsv` file: the first two columns are the lookup key, and the third column is a `,`-separated sorted list of UUIDs that hold that pair.
+The `kv` / `vk` files are flat three-column `rtsv` files: the first two columns are the lookup key, and the third column is a `,`-separated sorted list of UUIDs that hold that pair. The `uuid` file is a single-column list — the sorted set of UUIDs present in the sorted section.
 
 ### 13.2 Execution Steps
 
 1. **Compact** — run `--compact` on `<target.dov>`. This ensures the source reflects all pending writes and has a current timestamp footer.
 2. **Read timestamp** — read the `# YYYYDDMMhhmmss` comment from the last line of `<target.dov>`.
-3. **Check existing indexes** — if both `.rtv` files exist and their timestamp footers match the `.dov` timestamp exactly, skip regeneration and exit cleanly.
+3. **Check existing indexes** — if all three `.rtv` files exist and their timestamp footers match the `.dov` timestamp exactly, skip regeneration and exit cleanly.
 4. **Generate `<target>.kv.rtv`** — stream all sorted-section records; emit one row per (key, value) pair, accumulating UUIDs; sort by (col 1, col 2); write.
 5. **Generate `<target>.vk.rtv`** — same pass with columns 1 and 2 swapped; sort by (col 1, col 2); write.
-6. **Append timestamp footer** — write `# YYYYDDMMhhmmss` as the final line of each `.rtv` file, using the value read from the `.dov` in step 2.
+6. **Generate `<target>.uuid.rtv`** — emit each UUID from the sorted section exactly once, in ascending order.
+7. **Append timestamp footer** — write `# YYYYDDMMhhmmss` as the final line of each `.rtv` file, using the value read from the `.dov` in step 2.
 
 ### 13.3 Skip Condition
 
@@ -605,8 +616,10 @@ Each file is a flat three-column `rtsv` file: the first two columns are the look
 skip if:
     kv.rtv exists
     AND vk.rtv exists
+    AND uuid.rtv exists
     AND kv.rtv last line == dov last line   (exact string match)
     AND vk.rtv last line == dov last line
+    AND uuid.rtv last line == dov last line
 ```
 
 This makes repeated calls to `--relate` on an unchanged database effectively free.
@@ -619,7 +632,7 @@ This makes repeated calls to `--relate` on an unchanged database effectively fre
 tsdb --plane <target.dov>
 ```
 
-`--plane` generates a pair of fully flattened inverted-index files (`ptsv` format) from a `.dov` database. It is the denormalised counterpart to `--relate`: each `(key, value, uuid)` triple occupies its own row, so there is no array nesting in column 3. In addition, canonical array values in the source record (see §3.1 / DOTSV §4.1) are split at this stage — each element becomes its own col-2 entry and its own row.
+`--plane` generates a triple of fully flattened inverted-index files (`ptsv` format) from a `.dov` database. It is the denormalised counterpart to `--relate`: each `(key, value, uuid)` triple occupies its own row, so there is no array nesting in column 3. In addition, canonical array values in the source record (see §3.1 / DOTSV §4.1) are split at this stage — each element becomes its own col-2 entry and its own row.
 
 ### 14.1 Output Files
 
@@ -627,8 +640,9 @@ tsdb --plane <target.dov>
 |-----------------------|----------------------------------------------------------|
 | `<target>.kv.ptv`    | Key-value flat index — sorted by (key, value, uuid)      |
 | `<target>.vk.ptv`    | Value-key flat index — sorted by (value, key, uuid)      |
+| `<target>.uuid.ptv`  | Sorted list of all UUIDs in the database, one per line   |
 
-Each file is a three-column `ptsv` file with exactly one UUID per row. For a `.rtv` row whose column 3 contains *j* UUIDs, the corresponding `.ptv` produces *j* rows.
+The `kv` / `vk` files are three-column `ptsv` files with exactly one UUID per row. For a `.rtv` row whose column 3 contains *j* UUIDs, the corresponding `.ptv` produces *j* rows. The `uuid.ptv` file has identical content to `uuid.rtv` — a sorted single-column UUID list — and is emitted from `--plane` so consumers working purely in `ptsv` space do not need to cross formats.
 
 ### 14.2 Execution Steps
 
@@ -636,10 +650,11 @@ Identical to `--relate` except the index schema is denormalised and canonical ar
 
 1. **Compact** — run `--compact` on `<target.dov>` so the sorted section reflects all pending writes and the timestamp is current.
 2. **Read timestamp** — read the `# YYYYDDMMhhmmss` comment from the last line of `<target.dov>`.
-3. **Check existing indexes** — if both `.ptv` files exist and their timestamp footers match the `.dov` timestamp exactly, skip regeneration and exit cleanly.
+3. **Check existing indexes** — if all three `.ptv` files exist and their timestamp footers match the `.dov` timestamp exactly, skip regeneration and exit cleanly.
 4. **Generate `<target>.kv.ptv`** — stream all sorted-section records; for each `(key, value)` pair, if `value` is in canonical array form decode it and emit one row per `(key, element, uuid)` triple, otherwise emit a single `(key, value, uuid)` row; sort by (col 1, col 2, col 3); write.
 5. **Generate `<target>.vk.ptv`** — same pass with the array expansion applied in col 1, emitting `(element, key, uuid)` rows.
-6. **Append timestamp footer** — write `# YYYYDDMMhhmmss` as the final line of each `.ptv` file, using the value read from the `.dov` in step 2.
+6. **Generate `<target>.uuid.ptv`** — emit each UUID from the sorted section exactly once, in ascending order.
+7. **Append timestamp footer** — write `# YYYYDDMMhhmmss` as the final line of each `.ptv` file, using the value read from the `.dov` in step 2.
 
 A malformed canonical array value in the source `.dov` (e.g. unquoted element, trailing backslash, missing closing bracket) aborts generation with a parse error rather than producing a corrupt or partial index.
 
@@ -649,13 +664,15 @@ A malformed canonical array value in the source `.dov` (e.g. unquoted element, t
 skip if:
     kv.ptv exists
     AND vk.ptv exists
+    AND uuid.ptv exists
     AND kv.ptv last line == dov last line   (exact string match)
     AND vk.ptv last line == dov last line
+    AND uuid.ptv last line == dov last line
 ```
 
 ### 14.4 Relationship to `--relate`
 
-`--plane` and `--relate` are independent. They write to separate files (`*.ptv` vs `*.rtv`) and each maintains its own skip-if-current check. A `.dov` with both commands run will have four index files. `--query` currently consumes `rtsv`; `ptsv` is provided for external consumers that prefer one-record-per-line output.
+`--plane` and `--relate` are independent. They write to separate files (`*.ptv` vs `*.rtv`) and each maintains its own skip-if-current check. A `.dov` with both commands run will have six index files (`kv`/`vk`/`uuid` in each format). `--query` currently consumes `rtsv`; `ptsv` is provided for external consumers that prefer one-record-per-line output.
 
 ---
 
@@ -746,4 +763,187 @@ Sort order matches `rtsv` for the first two columns; the uuid becomes the tiebre
 
 ### `qtsv` (Query TSV)
 
-Input format for `--query` mode. The optional mode declaration on the first line selects `union` or `intersect` semantics. Criterion lines are bare tokens (searched in both indexes) or `key\tvalue` pairs (exact lookup in `kv.rtv`). See §15 for full execution semantics.
+Input format for `--query` mode. The optional mode declaration on the first line selects `union` or `intersect` semantics. Criterion lines are bare tokens (searched in both indexes) or `key\tvalue` pairs (exact lookup in `kv.rtv`). v0.5 also accepts `@present\t<key>`, `@absent\t<key>`, and `@absent\t<key>\t<value>` directives — see §20. The leading `@` is a reserved sigil. See §15 for full execution semantics.
+
+---
+
+## 17. `--filter` Mode
+
+```
+tsdb --filter <filter.ftv> <target.dov>
+tsdb --filter <filter.ftv> <target.dov> --show [<out.dtv>|-]
+```
+
+`--filter` (introduced in v0.5) is a rich predicate runner. It auto-runs `--relate` and `--plane`, then evaluates the predicates in `<filter.ftv>` against the resulting indexes and prints matching UUIDs to stdout. Add `--show` to emit full records instead — see §19.
+
+### 17.1 `ftsv` (Filter TSV)
+
+| Property         | Value                          |
+|------------------|--------------------------------|
+| Extension        | `*.ftv`                        |
+| Encoding         | UTF-8, no BOM                  |
+| Line ending      | `\n`                           |
+| Hand-authored    | Yes                            |
+| Default mode     | `intersect`                    |
+
+Each non-blank, non-comment line is either a flat predicate, an `and` / `or` combinator opener, an `end` closer, or a mode declaration (`# mode\tunion` / `# mode\tintersect`).
+
+Operator vocabulary (19 tokens):
+
+| Op                       | Args        | Meaning                                                     | Required index    |
+|--------------------------|-------------|-------------------------------------------------------------|-------------------|
+| `has`                    | key         | Record has the key (any value)                              | `kv.rtv`          |
+| `nohas`                  | key         | Record lacks the key                                        | `kv.rtv` + `uuid.rtv` |
+| `eq`                     | key, value  | Record has key=value (lex)                                  | `kv.rtv` (or `kv.ptv` for per-element on arrays) |
+| `ne`                     | key, value  | Record has key with value ≠ given (lex; record-level)       | `kv.rtv`          |
+| `lt` `le` `gt` `ge`      | key, value  | Lex comparison on stored string                             | `kv.ptv`          |
+| `pre` `suf` `sub`        | key, value  | Prefix / suffix / substring match on string value           | `kv.ptv`          |
+| `neq` `nne`              | key, value  | Numeric equality / inequality (uses normal-form encoding)   | `ord.ptv`         |
+| `nlt` `nle` `ngt` `nge`  | key, value  | Numeric comparison                                          | `ord.ptv`         |
+
+Combinators `and ... end` and `or ... end` group sub-predicates. Children may be predicates or further combinators (depth ≤ 4; deeper nesting is a parse error).
+
+Example:
+
+```
+# mode	intersect
+has	city
+ngt	age	30
+or
+eq	city	Tokyo
+eq	city	Osaka
+end
+nohas	deleted_at
+```
+
+Reads as: city-key set AND age numerically > 30 AND (city=Tokyo OR city=Osaka) AND no `deleted_at` field.
+
+### 17.2 Numeric vs lex semantics
+
+Numeric ops (`n`-prefixed) use `.ord.ptv` and operate on a normal-form encoding of decimal values matching `^-?\d+(\.\d+)?$`. Lex ops (`lt`, `gt`, etc.) operate on the stored string column 2 of `.kv.ptv` — so `"30" < "5"` lex (which catches the user the first time they want a numeric range and reach for `lt`). The explicit prefix split is intentional.
+
+### 17.3 Mixed-type columns
+
+A numeric op against a column where some records hold non-numeric values silently excludes those records and emits one summary line on stderr per offending op (e.g. `warning: 'nlt age 5' skipped 3 record(s) with non-numeric value`). Exit code stays 0.
+
+### 17.4 Per-element semantics on array values
+
+Because `.kv.ptv` and `.ord.ptv` already expand canonical array values (one row per element, see §14 / §18), `--filter` predicates are element-level for array fields. `eq role admin` matches a record holding `role=["admin","editor"]`; `ngt score 50` matches a record holding `score=["10","60","70"]` via the 60 and 70 elements.
+
+`ne` is record-level (set difference): `ne done true` returns records that have `done` AND whose value differs from `true`, so it does NOT include records lacking the key entirely. To get the asymmetric "lacks-key OR differs" semantics, compose `or\nnohas\tdone\nne\tdone\ttrue\nend` — or use `@absent\tdone\ttrue` from `.qtv`.
+
+---
+
+## 18. `*.ord.ptv` Numeric Companion Plane Index
+
+```
+<target>.ord.ptv
+```
+
+Generated by `--plane` alongside the existing three `.ptv` files (v0.5). One row per (numeric value, key, uuid) triple, sorted by `(norm, key, raw-value, uuid)`.
+
+| Column | Meaning                                                         |
+|--------|-----------------------------------------------------------------|
+| 1      | `norm` — sortable numeric-normal-form encoding (P/N + magnitude) |
+| 2      | key                                                              |
+| 3      | raw-value — the original string from `.dov` (NOT normalised)     |
+| 4      | uuid                                                             |
+
+The last line is a `# YYYYDDMMhhmmss` footer matching the source `.dov`.
+
+### 18.1 Numeric-normal form (`norm`)
+
+```
+norm     = sign , magnitude
+sign     = "P" for non-negative, "N" for negative
+magnitude (non-negative): <4-digit int-len> "_" <int-part> [ "." <fraction-trimmed> ]
+magnitude (negative):     same shape, but each digit (and the int-len digits) digit-complemented (0↔9, 1↔8, …),
+                          with a trailing "~" terminator so that shorter fractional strings sort AFTER longer ones lex.
+```
+
+Worked examples:
+
+| Raw | norm |
+|-----|------|
+| `0` | `P0001_0` |
+| `5` | `P0001_5` |
+| `30` | `P0002_30` |
+| `100` | `P0003_100` |
+| `3.14` | `P0001_3.14` |
+| `-5` | `N9998_4~` |
+| `-30` | `N9997_69~` |
+| `-3.14` | `N9998_6.85~` |
+
+The `~` terminator on the negative side fixes a subtle lex-ordering hazard with variable-length fractional parts (e.g. `-3.1` vs `-3.14`); a property test exercises 1000 random pairs against the `f64` reference.
+
+### 18.2 Skip-if-current rule (extended for v0.5)
+
+`--plane` now skips regeneration only when **all four** companion files (`kv.ptv`, `vk.ptv`, `uuid.ptv`, `ord.ptv`) exist and carry footers matching the source `.dov`. The first run after upgrading a v0.5 install rewrites all four — the three legacy outputs are byte-identical (modulo a refreshed footer if `.dov` itself changed in the meantime).
+
+### 18.3 What is excluded
+
+Values that don't match `^-?\d+(\.\d+)?$` (scientific notation, hex, leading zeros except a lone `0`, leading whitespace, `+`-prefixed, etc.) are not represented in `.ord.ptv`. Numeric ops cannot match such records — see §17.3 for the warning behaviour.
+
+---
+
+## 19. `--show` Modifier and `*.dtv`
+
+`--show` is a modifier on `--query` and `--filter` that emits full DOTSV records instead of bare UUIDs.
+
+### 19.1 Forms
+
+```
+... --show               → records to stdout
+... --show -             → records to stdout (alias; lets scripts always pass an arg)
+... --show <out.dtv>     → atomic write to file
+```
+
+A path argument that begins with `-` other than the lone `-` alias is rejected at argv-parse time with exit code 2. To use such a path, pass it as `./<path>` or place it in a directory.
+
+### 19.2 `dtsv` (Display TSV)
+
+| Property | Value |
+|----------|-------|
+| Extension | `*.dtv` |
+| Encoding | UTF-8 |
+| Line ending | `\n` |
+| Hand-authored | No — output of `--query --show` / `--filter --show` only |
+
+Each non-footer line is a complete DOTSV record: `<uuid>\t<key=value>\t...`. Records sort by UUID (matching the `.dov` sorted section). KV pairs within a record are key-sorted (matching `Record::serialize`). Canonical array values stay packed (`role=["admin","editor"]`); `--show` is record-level, never per-element.
+
+Footer: `# YYYYDDMMhhmmss`, exact-byte copy of the `.dov` footer at execution time.
+
+### 19.3 Skip-if-current (file mode)
+
+`--show <out.dtv>` skips regeneration iff:
+- `<out.dtv>` exists,
+- its last line equals the `.dov` footer,
+- AND `mtime(criterion-file)` < `mtime(<out.dtv>)`.
+
+Stdout mode is never skipped. Skipped runs print `skipped: <out.dtv> already current` to stderr.
+
+### 19.4 Argument ordering
+
+`--show` and its optional path argument always trail the second positional (the `.dov`). This keeps the existing 4-arg `--query <qtv> <dov>` invocation byte-identical.
+
+---
+
+## 20. `.qtv` Field-Absence Directives (`@present` / `@absent`)
+
+In v0.5 the `.qtv` grammar gains three reserved directives:
+
+| Form              | Syntax                       | Semantics                                                                          |
+|-------------------|------------------------------|------------------------------------------------------------------------------------|
+| Present           | `@present\t<key>`            | UUIDs that have at least one binding for `<key>` (any value)                       |
+| Absent            | `@absent\t<key>`             | UUIDs that have **no** binding for `<key>`                                         |
+| Absent (key+val)  | `@absent\t<key>\t<value>`    | UUIDs lacking the exact `key=value` pair (lacks key entirely OR has a different value) |
+
+The leading `@` is reserved as the directive sigil at the start of a line. An unknown `@xxx` line is rejected with `unknown qtv directive '@xxx'`. To use a value beginning with `@` in a regular two-column criterion, place it after the tab — only the first column is checked for the sigil.
+
+The universe of UUIDs for absence resolution is read from `<stem>.uuid.rtv` (already produced by `--relate` since v0.5). It is loaded lazily — only when at least one absence criterion exists.
+
+### 20.1 Semantic asymmetry vs `.ftv`'s `ne k v`
+
+`@absent\tdone\ttrue` (in `.qtv`) returns: records without `done` ∪ records with `done` ≠ `true`.
+
+`ne done true` (in `.ftv`) returns only the second set — records that have `done` AND whose value differs. To get `@absent` semantics inside `.ftv`, compose `or\nnohas\tdone\nne\tdone\ttrue\nend`. The asymmetry is documented and pinned by tests.

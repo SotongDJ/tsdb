@@ -8,7 +8,6 @@
 ///
 /// The null byte (0x00) is used as a sentinel meaning "delete this key" in
 /// patch operations; it is represented literally in the escaped form as `\x00`.
-
 use crate::error::TsdbError;
 
 /// Escape a raw key or value string for embedding in a DOTSV record.
@@ -288,7 +287,11 @@ mod tests {
 
     #[test]
     fn encode_array_basic() {
-        let vs = vec!["admin".to_string(), "editor".to_string(), "viewer".to_string()];
+        let vs = vec![
+            "admin".to_string(),
+            "editor".to_string(),
+            "viewer".to_string(),
+        ];
         assert_eq!(encode_array(&vs), r#"["admin","editor","viewer"]"#);
     }
 
@@ -307,10 +310,7 @@ mod tests {
     #[test]
     fn encode_array_with_quotes_and_backslashes() {
         let vs = vec![r#"bob "the hammer""#.to_string(), r"c:\path".to_string()];
-        assert_eq!(
-            encode_array(&vs),
-            r#"["bob \"the hammer\"","c:\\path"]"#
-        );
+        assert_eq!(encode_array(&vs), r#"["bob \"the hammer\"","c:\\path"]"#);
     }
 
     #[test]

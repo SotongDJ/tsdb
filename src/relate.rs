@@ -4,7 +4,6 @@
 /// The caller is responsible for compacting and atomically writing the .dov
 /// before calling `generate_rtvs`. This module only reads from the file system
 /// and writes the two index files.
-
 use crate::dotsv::{DotsvFile, Record};
 use crate::error::{Result, TsdbError};
 use crate::escape::escape;
@@ -35,6 +34,17 @@ pub fn vk_rtv_path(dov_path: &Path) -> PathBuf {
     dov_path.with_file_name(format!("{}.vk.rtv", stem))
 }
 
+/// Derive the `.uuid.rtv` path from a `.dov` path.
+/// `target.dov` → `target.uuid.rtv`
+pub fn uuid_rtv_path(dov_path: &Path) -> PathBuf {
+    let stem = dov_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    dov_path.with_file_name(format!("{}.uuid.rtv", stem))
+}
+
 /// Generate (or update) `<target>.kv.rtv` and `<target>.vk.rtv` from `db`.
 ///
 /// `dov_path` is used to:
@@ -56,22 +66,54 @@ pub fn generate_rtvs(dov_path: &Path, db: &DotsvFile) -> Result<()> {
 
     let kv_path = kv_rtv_path(dov_path);
     let vk_path = vk_rtv_path(dov_path);
+    let uuid_path = uuid_rtv_path(dov_path);
 
     let dov_ts = read_last_nonempty_line(dov_path)?;
 
-    // Skip if both indexes are already current.
-    if kv_path.exists() && vk_path.exists() {
+    // Skip if all three indexes are already current.
+    if kv_path.exists() && vk_path.exists() && uuid_path.exists() {
         let kv_ts = read_last_nonempty_line(&kv_path).unwrap_or_default();
         let vk_ts = read_last_nonempty_line(&vk_path).unwrap_or_default();
-        if kv_ts == dov_ts && vk_ts == dov_ts {
+        let uuid_ts = read_last_nonempty_line(&uuid_path).unwrap_or_default();
+        if kv_ts == dov_ts && vk_ts == dov_ts && uuid_ts == dov_ts {
             return Ok(());
         }
     }
 
     let (kv_rows, vk_rows) = build_index_rows(db)?;
+    let uuids = collect_uuids(db)?;
     write_rtv_file(&kv_path, &kv_rows, &dov_ts)?;
     write_rtv_file(&vk_path, &vk_rows, &dov_ts)?;
+    write_uuid_file(&uuid_path, &uuids, &dov_ts)?;
 
+    Ok(())
+}
+
+/// Collect the sorted list of UUIDs from the sorted section.
+fn collect_uuids(db: &DotsvFile) -> Result<Vec<String>> {
+    let mut uuids: BTreeSet<String> = BTreeSet::new();
+    for (i, line) in db.sorted.iter().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let rec = Record::parse(line, i + 1)?;
+        uuids.insert(rec.uuid);
+    }
+    Ok(uuids.into_iter().collect())
+}
+
+/// Write a sorted list of UUIDs to a `.uuid.rtv` file, one per line,
+/// followed by the timestamp footer.
+fn write_uuid_file(path: &Path, uuids: &[String], timestamp: &str) -> Result<()> {
+    let file = File::create(path)?;
+    let mut w = BufWriter::new(file);
+    for uuid in uuids {
+        w.write_all(uuid.as_bytes())?;
+        w.write_all(b"\n")?;
+    }
+    w.write_all(timestamp.as_bytes())?;
+    w.write_all(b"\n")?;
+    w.flush()?;
     Ok(())
 }
 
@@ -171,10 +213,8 @@ mod tests {
         }
         impl TempDir {
             pub fn new() -> Self {
-                let path = std::env::temp_dir().join(format!(
-                    "tsdb_relate_test_{:016x}",
-                    rand::random::<u64>()
-                ));
+                let path = std::env::temp_dir()
+                    .join(format!("tsdb_relate_test_{:016x}", rand::random::<u64>()));
                 std::fs::create_dir_all(&path).unwrap();
                 TempDir { path }
             }
@@ -280,6 +320,40 @@ mod tests {
     }
 
     #[test]
+    fn test_uuid_rtv_path() {
+        let p = Path::new("/data/store.dov");
+        assert_eq!(uuid_rtv_path(p), Path::new("/data/store.uuid.rtv"));
+    }
+
+    #[test]
+    fn test_uuid_rtv_content() {
+        let tmp = tmp::TempDir::new();
+        let dov = make_test_db(&tmp);
+        let db = DotsvFile::load(&dov).unwrap();
+        generate_rtvs(&dov, &db).unwrap();
+
+        let content = fs::read_to_string(uuid_rtv_path(&dov)).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        // 3 UUID lines + 1 timestamp footer
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "AGk26cH00001");
+        assert_eq!(lines[1], "AGk26cH00002");
+        assert_eq!(lines[2], "AGk26cH00003");
+    }
+
+    #[test]
+    fn test_uuid_rtv_timestamp_matches_dov() {
+        let tmp = tmp::TempDir::new();
+        let dov = make_test_db(&tmp);
+        let db = DotsvFile::load(&dov).unwrap();
+        generate_rtvs(&dov, &db).unwrap();
+
+        let dov_ts = read_last_nonempty_line(&dov).unwrap();
+        let uuid_ts = read_last_nonempty_line(&uuid_rtv_path(&dov)).unwrap();
+        assert_eq!(uuid_ts, dov_ts);
+    }
+
+    #[test]
     fn test_generate_rtvs_skip_when_current() {
         let tmp = tmp::TempDir::new();
         let dov = make_test_db(&tmp);
@@ -291,6 +365,9 @@ mod tests {
         // Second call should skip (timestamps match)
         generate_rtvs(&dov, &db).unwrap();
         let kv_mtime2 = fs::metadata(kv_rtv_path(&dov)).unwrap().modified().unwrap();
-        assert_eq!(kv_mtime, kv_mtime2, "kv.rtv should not be rewritten when current");
+        assert_eq!(
+            kv_mtime, kv_mtime2,
+            "kv.rtv should not be rewritten when current"
+        );
     }
 }

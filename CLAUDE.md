@@ -111,3 +111,33 @@ Whitepaper pages are live mirrors of the `_ref/` sources. Always read the curren
 
 - `_ref/DOTSV-whitepaper.md` → `page_files/05-dotsv-whitepaper.html` (path `/dotsv-whitepaper/`)
 - `_ref/tsdb-whitepaper.md` → `page_files/06-tsdb-whitepaper.html` (path `/tsdb-whitepaper/`)
+
+## Developing Round Workflow
+
+Used for significant new features (new CLI flags, new file formats, semantics changes). Four-agent process; each round records to `_temp/proposal/round-N/` (git-ignored under `_temp/`).
+
+### Roles
+
+| Agent  | Role                  | Output file                 |
+|--------|-----------------------|-----------------------------|
+| Apple  | Independent designer  | `apple.md`                  |
+| Orange | Independent designer  | `orange.md`                 |
+| Banana | Consolidator          | `banana.md`                 |
+| Pie    | Strict reviewer       | `pie.md` (APPROVE / REJECT) |
+
+Apple and Orange MUST design without seeing each other's work — diverse proposals are the point.
+
+### Flow
+
+1. **Apple + Orange in parallel** — spawn both in a single message (two `Agent` calls, `run_in_background: true`, model: opus). Each gets the same self-contained brief: project context (CLAUDE.md, README.md, relevant `src/`, `_ref/`), the gaps to solve, hard constraints (existing CLI surface and output bytes unchanged; new features get NEW flags AND NEW file extensions; no new third-party deps), and required deliverables (CLI surface, new file-format grammar, algorithm, backward-compat ledger, edge cases, named `#[test] fn ...` test plan).
+2. **Banana consolidates** — reads both proposals, resolves conflicts, produces one merged design with a Decisions Ledger (per-divergence justification, what was rejected and why) and a Risk Register.
+3. **Pie reviews** — strict structured verdict: Findings (severity + location + required fix), per-gap completeness check, backward-compat audit (verdict per existing artefact), test-plan audit by category. Any genuine defect is REJECT.
+4. **REJECT** → Apple and Orange revise per Pie's per-agent task list → Banana re-merges → Pie re-reviews. Repeat.
+5. **APPROVE** → a builder agent implements per Pie's commit-order guidance, absorbing minor findings inline. Builder appends progress to `build-log.md` in the round directory and does NOT commit (leaves working tree dirty for user review).
+
+### Conventions
+
+- Track each round with `TaskCreate`/`TaskUpdate` and `blockedBy` chains: Apple+Orange → Banana → Pie → Implementer.
+- New requirements arriving mid-round go into the next round's `requirements.md`, not the current round.
+- Each approved round typically bumps the project version (e.g. round 1 = v0.4 → v0.5, round 2 = v0.5 → v0.6).
+- The user commits at the end. Do NOT commit on their behalf unless asked.

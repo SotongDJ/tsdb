@@ -11,7 +11,6 @@
 ///   4. Append WAIT entry; release lock
 ///   5. Poll until we are first WAIT with no EXEC → promote to EXEC; execute
 ///   6. After execution, remove our entry
-
 use crate::error::{Result, TsdbError};
 use fs2::FileExt;
 use std::collections::HashSet;

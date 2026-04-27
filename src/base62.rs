@@ -17,19 +17,18 @@
 /// m       = minute via Format-G alphabet (0-59)
 /// s       = second via Format-G alphabet (0-59)
 /// XX      = 2-char order suffix (alphanumeric, starts at "01")
-
 use crate::error::{Result, TsdbError};
 
 /// Format-G 60-char alphabet.
-pub(crate) const FORMAT_G: &[u8; 60] = b"0123456789abcdefghijkmnopqrstuvwxyzABCDEFGHIJKLMNPQRSTUVWXYZ";
+pub(crate) const FORMAT_G: &[u8; 60] =
+    b"0123456789abcdefghijkmnopqrstuvwxyzABCDEFGHIJKLMNPQRSTUVWXYZ";
 
 /// Month encoding table: index 0 = unused, 1..=12 → char
 pub(crate) const MONTH_TABLE: &[u8; 13] = b"\x00abcdefABCDEF";
 
 /// Day encoding table: index 0 = unused, 1..=31 → char
 /// 1→'0', 2→'1', ..., 10→'9', 11→'a', ..., 21→'k', 22→'A', ..., 31→'J'
-pub(crate) const DAY_TABLE: &[u8; 32] =
-    b"\x000123456789abcdefghijkABCDEFGHIJ";
+pub(crate) const DAY_TABLE: &[u8; 32] = b"\x000123456789abcdefghijkABCDEFGHIJ";
 
 /// Hour encoding table: index 0..=23 → char
 /// 0→'0', 1→'a', 2→'b', ..., 12→'l', 13→'A', ..., 23→'K'
