@@ -10,10 +10,7 @@ fn tsdb_bin() -> PathBuf {
 }
 
 fn temp_dir() -> PathBuf {
-    let p = std::env::temp_dir().join(format!(
-        "tsdb_int_records_{:016x}",
-        rand::random::<u64>()
-    ));
+    let p = std::env::temp_dir().join(format!("tsdb_int_records_{:016x}", rand::random::<u64>()));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
@@ -232,10 +229,7 @@ fn integration_records_input_order_matches_input_file() {
          +AGk26cH00003\tname=Carol\n",
     );
     let utv = tmp.join("input.utv");
-    write_file(
-        &utv,
-        "AGk26cH00003\nAGk26cH00001\nAGk26cH00002\n",
-    );
+    write_file(&utv, "AGk26cH00003\nAGk26cH00001\nAGk26cH00002\n");
     let out = Command::new(tsdb_bin())
         .arg("--records")
         .arg(&utv)
@@ -253,10 +247,7 @@ fn integration_records_input_order_matches_input_file() {
 #[test]
 fn integration_records_coerces_numbers_booleans_arrays() {
     let tmp = temp_dir();
-    let dov = build_db(
-        &tmp,
-        "+AGk26cH00001\tn=42\tb=true\ta=x\ta=y\n",
-    );
+    let dov = build_db(&tmp, "+AGk26cH00001\tn=42\tb=true\ta=x\ta=y\n");
     let utv = tmp.join("input.utv");
     write_file(&utv, "AGk26cH00001\n");
     let out = Command::new(tsdb_bin())
@@ -275,10 +266,7 @@ fn integration_records_coerces_numbers_booleans_arrays() {
 #[test]
 fn integration_records_timestamp_stays_string() {
     let tmp = temp_dir();
-    let dov = build_db(
-        &tmp,
-        "+AGk26cH00001\tcreated=20262903143022\n",
-    );
+    let dov = build_db(&tmp, "+AGk26cH00001\tcreated=20260329143022\n");
     let utv = tmp.join("input.utv");
     write_file(&utv, "AGk26cH00001\n");
     let out = Command::new(tsdb_bin())
@@ -289,7 +277,7 @@ fn integration_records_timestamp_stays_string() {
         .unwrap();
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
-    assert!(s.contains("\"created\":\"20262903143022\""));
+    assert!(s.contains("\"created\":\"20260329143022\""));
 }
 
 #[test]

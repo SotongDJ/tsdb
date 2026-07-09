@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn encode_value_timestamp_quoted_string() {
-        assert_eq!(encode_to_string("20262903143022"), "\"20262903143022\"");
+        assert_eq!(encode_to_string("20260329143022"), "\"20260329143022\"");
     }
 
     #[test]
@@ -758,14 +758,14 @@ mod tests {
                 ("name", "Alice"),
                 ("age", "30"),
                 ("active", "true"),
-                ("created", "20262903143022"),
+                ("created", "20260329143022"),
                 ("tags", r#"["x","y"]"#),
             ],
         );
         let line = emit_to_string(&r);
         assert!(line.contains("\"active\":true"));
         assert!(line.contains("\"age\":30"));
-        assert!(line.contains("\"created\":\"20262903143022\""));
+        assert!(line.contains("\"created\":\"20260329143022\""));
         assert!(line.contains("\"name\":\"Alice\""));
         assert!(line.contains(r#""tags":["x","y"]"#));
     }
@@ -782,20 +782,14 @@ mod tests {
         // sorts equal to the injected one (both literal "_uuid").
         // The emitted shape is therefore:
         //   {"_uuid":"AGk26cH00001","_uuid":"hi"}
-        assert_eq!(
-            line,
-            "{\"_uuid\":\"AGk26cH00001\",\"_uuid\":\"hi\"}\n"
-        );
+        assert_eq!(line, "{\"_uuid\":\"AGk26cH00001\",\"_uuid\":\"hi\"}\n");
     }
 
     #[test]
     fn emit_jsonl_line_underscore_missing_user_key_documented() {
         let r = rec("AGk26cH00001", &[("_missing", "yes")]);
         let line = emit_to_string(&r);
-        assert_eq!(
-            line,
-            "{\"_uuid\":\"AGk26cH00001\",\"_missing\":\"yes\"}\n"
-        );
+        assert_eq!(line, "{\"_uuid\":\"AGk26cH00001\",\"_missing\":\"yes\"}\n");
     }
 
     #[test]
@@ -857,10 +851,7 @@ mod tests {
              +AGk26cH00001\tname=Alice\n\
              +BGk26cH00001\tname=Bob\n",
         );
-        let out = run_records_to_buffer(
-            &["BGk26cH00001", "CGk26cH00001", "AGk26cH00001"],
-            &dov,
-        );
+        let out = run_records_to_buffer(&["BGk26cH00001", "CGk26cH00001", "AGk26cH00001"], &dov);
         let lines: Vec<&str> = out.lines().collect();
         assert!(lines[0].contains("Bob"));
         assert!(lines[1].contains("Carol"));
@@ -871,10 +862,7 @@ mod tests {
     fn run_records_missing_uuid_emits_sentinel_in_position() {
         let tmp = tmp::TempDir::new();
         let dov = make_db(&tmp, "+AGk26cH00001\tname=Alice\n");
-        let out = run_records_to_buffer(
-            &["AGk26cH00001", "ZGk26cH00001", "AGk26cH00001"],
-            &dov,
-        );
+        let out = run_records_to_buffer(&["AGk26cH00001", "ZGk26cH00001", "AGk26cH00001"], &dov);
         let lines: Vec<&str> = out.lines().collect();
         assert!(lines[0].contains("Alice"));
         assert!(lines[1].contains("\"_missing\":true"));
@@ -984,11 +972,7 @@ mod tests {
              +AGk26cH00003\tname=Carol\n",
         );
         let utv = tmp.path().join("input.utv");
-        std::fs::write(
-            &utv,
-            b"AGk26cH00001\nAGk26cH00002\nAGk26cH00003\n",
-        )
-        .unwrap();
+        std::fs::write(&utv, b"AGk26cH00001\nAGk26cH00002\nAGk26cH00003\n").unwrap();
         run_records_mode(&utv.to_string_lossy(), &dov).unwrap();
     }
 

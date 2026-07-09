@@ -168,7 +168,7 @@ impl DotsvFile {
     }
 
     /// Write to a file (creates or truncates).
-    /// Always appends a `# YYYYDDMMhhmmss` timestamp as the final line.
+    /// Always appends a `# YYYYMMDDhhmmss` timestamp as the final line.
     pub fn write_to(&self, path: &Path) -> Result<()> {
         let file = File::create(path)?;
         let mut w = BufWriter::new(file);
@@ -504,7 +504,7 @@ pub fn atomic_write(db: &DotsvFile, target: &Path) -> Result<()> {
 // Timestamp helpers
 // ---------------------------------------------------------------------------
 
-/// Return the current UTC time formatted as `YYYYDDMMhhmmss`.
+/// Return the current UTC time formatted as `YYYYMMDDhhmmss`.
 pub fn current_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -514,14 +514,14 @@ pub fn current_timestamp() -> String {
     format_timestamp(secs)
 }
 
-/// Format a Unix epoch seconds value (UTC) as `YYYYDDMMhhmmss`.
+/// Format a Unix epoch seconds value (UTC) as `YYYYMMDDhhmmss`.
 pub fn format_timestamp(epoch_secs: u64) -> String {
     let rem = (epoch_secs % 86400) as u32;
     let h = rem / 3600;
     let mi = (rem % 3600) / 60;
     let s = rem % 60;
     let (y, mo, d) = days_to_ymd(epoch_secs / 86400);
-    format!("{:04}{:02}{:02}{:02}{:02}{:02}", y, d, mo, h, mi, s)
+    format!("{:04}{:02}{:02}{:02}{:02}{:02}", y, mo, d, h, mi, s)
 }
 
 /// Convert days since Unix epoch (1970-01-01) to (year, month, day).

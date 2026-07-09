@@ -58,7 +58,7 @@ fn integration_classifier_consistency_kt_ptv_and_records_agree_on_every_value() 
                    +AGk26cH00003\tnum_field=-3.14\n\
                    +AGk26cH00004\tbool_field=true\n\
                    +AGk26cH00005\tbool_field=false\n\
-                   +AGk26cH00006\tts_field=20262903143022\n\
+                   +AGk26cH00006\tts_field=20260329143022\n\
                    +AGk26cH00007\tarr_field=admin\tarr_field=editor\n\
                    +AGk26cH00008\ttricky_field=00\n";
     fs::write(&atv, actions).unwrap();
@@ -89,14 +89,14 @@ fn integration_classifier_consistency_kt_ptv_and_records_agree_on_every_value() 
         }),
         ("num_field", "number", |v: &str| {
             // Bare number token, no surrounding quotes.
-            !v.starts_with('"') && !v.starts_with('[') && (v.starts_with('-') || v.chars().next().is_some_and(|c| c.is_ascii_digit()))
+            !v.starts_with('"')
+                && !v.starts_with('[')
+                && (v.starts_with('-') || v.chars().next().is_some_and(|c| c.is_ascii_digit()))
         }),
         ("bool_field", "boolean", |v: &str| {
             v == "true" || v == "false"
         }),
-        ("ts_field", "timestamp", |v: &str| {
-            v == "\"20262903143022\""
-        }),
+        ("ts_field", "timestamp", |v: &str| v == "\"20260329143022\""),
         ("arr_field", "array", |v: &str| {
             v.starts_with('[') && v.ends_with(']')
         }),

@@ -134,8 +134,8 @@ pub fn is_numeric_shape(s: &str) -> bool {
 }
 
 /// `true` iff `v` is exactly 14 ASCII digits AND the component
-/// breakdown (per DOTSV §5: `YYYYDDMMhhmmss`) has plausible month, day,
-/// hour, minute, second ranges. Year is unconstrained — DOTSV §5 doesn't
+/// breakdown (per DOTSV §15: `YYYYMMDDhhmmss`) has plausible month, day,
+/// hour, minute, second ranges. Year is unconstrained — DOTSV §15 doesn't
 /// constrain it and `dotsv::current_timestamp` doesn't either. Leap-day
 /// calendar correctness is OUT OF SCOPE.
 pub fn is_timestamp(v: &str) -> bool {
@@ -146,17 +146,13 @@ pub fn is_timestamp(v: &str) -> bool {
     if !b.iter().all(|x| x.is_ascii_digit()) {
         return false;
     }
-    // YYYY DD MM hh mm ss
-    let dd = parse_2(b[4], b[5]);
-    let mm = parse_2(b[6], b[7]);
+    // YYYY MM DD hh mm ss
+    let mm = parse_2(b[4], b[5]);
+    let dd = parse_2(b[6], b[7]);
     let hh = parse_2(b[8], b[9]);
     let mn = parse_2(b[10], b[11]);
     let ss = parse_2(b[12], b[13]);
-    (1..=12).contains(&mm)
-        && (1..=31).contains(&dd)
-        && hh < 24
-        && mn < 60
-        && ss < 60
+    (1..=12).contains(&mm) && (1..=31).contains(&dd) && hh < 24 && mn < 60 && ss < 60
 }
 
 fn parse_2(hi: u8, lo: u8) -> u32 {
@@ -402,20 +398,20 @@ mod tests {
 
     #[test]
     fn classify_timestamp_valid() {
-        assert_eq!(classify("20262903143022"), KtType::Timestamp);
+        assert_eq!(classify("20260329143022"), KtType::Timestamp);
     }
 
     #[test]
     fn classify_timestamp_rejects_13_digits() {
         // 13 digits: not a timestamp (length), not a leading-zero number,
         // falls through to Number. The point of the test is "not Timestamp".
-        let t = classify("2026290314302");
+        let t = classify("2026032914302");
         assert_ne!(t, KtType::Timestamp);
     }
 
     #[test]
     fn classify_timestamp_rejects_15_digits() {
-        let t = classify("202629031430220");
+        let t = classify("202603291430220");
         assert_ne!(t, KtType::Timestamp);
     }
 
@@ -423,34 +419,34 @@ mod tests {
     fn classify_timestamp_rejects_alpha_in_position() {
         // Alpha in the digit positions kills both timestamp and number,
         // so this falls all the way through to String.
-        assert_eq!(classify("20262903143A22"), KtType::String);
+        assert_eq!(classify("20260329143A22"), KtType::String);
     }
 
     #[test]
     fn classify_timestamp_rejects_month_zero() {
-        // YYYY DD MM hh mm ss → 2026 29 00 14 30 22.  Not a timestamp
+        // YYYY MM DD hh mm ss → 2026 00 29 14 30 22.  Not a timestamp
         // (month=00); 14 ASCII digits with no leading zero, so it
         // classifies as Number.
-        let t = classify("20262900143022");
+        let t = classify("20260029143022");
         assert_ne!(t, KtType::Timestamp);
     }
 
     #[test]
     fn classify_timestamp_rejects_month_thirteen() {
-        let t = classify("20262913143022");
+        let t = classify("20261329143022");
         assert_ne!(t, KtType::Timestamp);
     }
 
     #[test]
     fn classify_timestamp_rejects_day_thirty_two() {
-        // YYYY DD MM hh mm ss → 2026 32 03 14 30 22
-        let t = classify("20263203143022");
+        // YYYY MM DD hh mm ss → 2026 03 32 14 30 22
+        let t = classify("20260332143022");
         assert_ne!(t, KtType::Timestamp);
     }
 
     #[test]
     fn classify_timestamp_rejects_hour_24() {
-        let t = classify("20262903243022");
+        let t = classify("20260329243022");
         assert_ne!(t, KtType::Timestamp);
     }
 
@@ -459,27 +455,27 @@ mod tests {
         // 14-digit value with leading zero: is_numeric_shape rejects it
         // (int_len > 1, leading 0). With invalid timestamp components
         // (month=13), it falls through all the way to String.
-        // Layout YYYY DD MM hh mm ss → 0000 13 13 14 30 22.
+        // Layout YYYY MM DD hh mm ss → 0000 13 13 14 30 22.
         // Banana §8.1 documents this case.
         assert_eq!(classify("00001313143022"), KtType::String);
     }
 
     #[test]
     fn classify_timestamp_accepts_year_9999() {
-        assert_eq!(classify("99992903143022"), KtType::Timestamp);
+        assert_eq!(classify("99990329143022"), KtType::Timestamp);
     }
 
     #[test]
     fn classify_timestamp_accepts_year_0001() {
-        assert_eq!(classify("00012903143022"), KtType::Timestamp);
+        assert_eq!(classify("00010329143022"), KtType::Timestamp);
     }
 
     #[test]
     fn classify_timestamp_leap_day_in_non_leap_year_passes() {
         // OOS per spec (§4.1 Banana): we don't enforce calendar correctness.
         // 2023 was not a leap year but Feb-29 still classifies as timestamp.
-        // YYYY DD MM hh mm ss → 2023 29 02 12 00 00
-        assert_eq!(classify("20232902120000"), KtType::Timestamp);
+        // YYYY MM DD hh mm ss → 2023 02 29 12 00 00
+        assert_eq!(classify("20230229120000"), KtType::Timestamp);
     }
 
     #[test]
@@ -488,14 +484,14 @@ mod tests {
         // can't be wrapped in `[…]` and stay 14 digits. Construct an array
         // whose element happens to be a valid timestamp; the OUTER value
         // is array.
-        assert_eq!(classify(r#"["20262903143022"]"#), KtType::Array);
+        assert_eq!(classify(r#"["20260329143022"]"#), KtType::Array);
     }
 
     #[test]
     fn classify_precedence_timestamp_beats_number() {
         // 14-digit valid components — would also match the number regex
         // (no leading zero, no decimal). Timestamp wins.
-        assert_eq!(classify("20262903143022"), KtType::Timestamp);
+        assert_eq!(classify("20260329143022"), KtType::Timestamp);
     }
 
     #[test]
@@ -559,7 +555,7 @@ mod tests {
 
     #[test]
     fn is_timestamp_basic_ok() {
-        assert!(is_timestamp("20262903143022"));
+        assert!(is_timestamp("20260329143022"));
     }
 
     #[test]
@@ -679,16 +675,17 @@ mod tests {
         let dov_ts = footer(&dov);
         generate_kt_ptv(&dov, &db, &dov_ts).unwrap();
         let content = std::fs::read_to_string(kt_ptv_path(&dov)).unwrap();
-        assert!(content.contains(
-            "name\tstring\t3\tAGk26cH00001,AGk26cH00002,AGk26cH00003\n"
-        ));
+        assert!(content.contains("name\tstring\t3\tAGk26cH00001,AGk26cH00002,AGk26cH00003\n"));
     }
 
     #[test]
     fn generate_kt_ptv_count_is_record_count_not_array_element_count() {
         // Record holding role=["a","b","c"] adds 1 to (role, array).
         let tmp = tmp::TempDir::new();
-        let dov = make_db(&tmp, "+AGk26cH00001\trole=admin\trole=editor\trole=viewer\n");
+        let dov = make_db(
+            &tmp,
+            "+AGk26cH00001\trole=admin\trole=editor\trole=viewer\n",
+        );
         let db = DotsvFile::load(&dov).unwrap();
         let dov_ts = footer(&dov);
         generate_kt_ptv(&dov, &db, &dov_ts).unwrap();
@@ -709,9 +706,7 @@ mod tests {
         let dov_ts = footer(&dov);
         generate_kt_ptv(&dov, &db, &dov_ts).unwrap();
         let content = std::fs::read_to_string(kt_ptv_path(&dov)).unwrap();
-        assert!(content.contains(
-            "city\tstring\t3\tAGk26cH00002,BGk26cH00003,CGk26cH00001\n"
-        ));
+        assert!(content.contains("city\tstring\t3\tAGk26cH00002,BGk26cH00003,CGk26cH00001\n"));
     }
 
     #[test]
@@ -736,7 +731,7 @@ mod tests {
         let dov = make_db(
             &tmp,
             "+AGk26cH00001\tx=1\ty=true\tz=hi\n\
-             +AGk26cH00002\tx=many\ty=20262903143022\n",
+             +AGk26cH00002\tx=many\ty=20260329143022\n",
         );
         let db = DotsvFile::load(&dov).unwrap();
         let dov_ts = footer(&dov);
