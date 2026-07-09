@@ -23,7 +23,7 @@ city	Tokyo	NGk26cHcv001
 city	Tokyo	NGk26cHdn002
 ```
 
-If `col1` has `i` distinct col2 values and each pair has `j` UUIDs, the index grows to `i × j` rows. Nothing else changes: same tab-separated columns, same escaping, same `# YYYYDDMMhhmmss` timestamp footer.
+If `col1` has `i` distinct col2 values and each pair has `j` UUIDs, the index grows to `i × j` rows. Nothing else changes: same tab-separated columns, same escaping, same `# YYYYMMDDhhmmss` timestamp footer.
 
 **Array-valued fields expand too.** A later revision (DOTSV 0.4) added canonical array values on disk — `role=["admin","editor","viewer"]` in a single record. `--plane` splits that array at generation time, so a record with a three-element `role` contributes three `(role, <elem>, uuid)` rows rather than one `(role, ["admin","editor","viewer"], uuid)` row. The `--relate` variant (`.rtv`) keeps arrays packed; only `ptsv` fans them out.
 
@@ -58,7 +58,7 @@ It compacts the source `.dov`, reads its timestamp footer, and writes both index
 | `<target>.kv.ptv`    | key    | value  | uuid  |
 | `<target>.vk.ptv`    | value  | key    | uuid  |
 
-Rows are sorted lexicographically on `(col 1, col 2, col 3)` — the same order `--relate` would produce if its comma lists were expanded and split. The final line of each file is a `# YYYYDDMMhhmmss` comment matching the source `.dov`. When that footer is already current, `--plane` is a no-op.
+Rows are sorted lexicographically on `(col 1, col 2, col 3)` — the same order `--relate` would produce if its comma lists were expanded and split. The final line of each file is a `# YYYYMMDDhhmmss` comment matching the source `.dov`. When that footer is already current, `--plane` is a no-op.
 
 ### Example
 

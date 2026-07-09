@@ -103,7 +103,7 @@ Four rounds of review between Sofia (Sonnet, code) and Matt (Opus, review). All 
 
 | Command | Meaning |
 |---------|---------|
-| `kk` | (1) Find every `?vTimestamp` or `?v{14-digit-timestamp}` in the project (e.g. `include_files/head.html`) and replace with `?v{YYYYDDMMhhmmss}` using current time. (2) `git add -A`. (3) `git commit -S` with a descriptive message. |
+| `kk` | (1) Find every `?vTimestamp` or `?v{14-digit-timestamp}` in the project (e.g. `include_files/head.html`) and replace with `?v{YYYYMMDDhhmmss}` using current time. (2) `git add -A`. (3) `git commit -S` with a descriptive message. |
 
 ## Whitepaper Pages
 

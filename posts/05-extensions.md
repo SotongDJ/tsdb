@@ -35,7 +35,7 @@ tsdb mydata.dov changes.atv
 
 Rows are sorted lexicographically on col 1 then col 2, so a binary search on either index is O(log n). The UUID list in col 3 is comma-separated with no spaces.
 
-The last line of every `.rtv` file is a timestamp comment in the format `# YYYYDDMMhhmmss`, matching the current timestamp of the source `.dov`. This footer is what allows `--relate` to skip regeneration when the indexes are already up to date.
+The last line of every `.rtv` file is a timestamp comment in the format `# YYYYMMDDhhmmss`, matching the current timestamp of the source `.dov`. This footer is what allows `--relate` to skip regeneration when the indexes are already up to date.
 
 Example — given these records in `users.dov`:
 
@@ -54,7 +54,7 @@ city	Tokyo	NGk26cHcv001,NGk26cHdn002
 name	Alice	NGk26cHcv001
 name	Bob	NGk26cHdn002
 name	Carol	EGk26cICK001
-# 20262903143022
+# 20260329143022
 ```
 
 ### `qtsv` — Query TSV (`*.qtv`)
@@ -138,7 +138,7 @@ tsdb users.dov archive.atv
 
 ## Timestamp tracking
 
-v0.2 also introduces a timestamp footer on `.dov` files. Every write operation — action file execution, compaction, and the implicit compact inside `--relate` — appends a `# YYYYDDMMhhmmss` comment as the final line of the `.dov`. This is a UTC timestamp; the field order is year, day, month, hour, minute, second (example: `# 20262903143022` for 2026-03-29 14:30:22 UTC).
+v0.2 also introduces a timestamp footer on `.dov` files. Every write operation — action file execution, compaction, and the implicit compact inside `--relate` — appends a `# YYYYMMDDhhmmss` comment as the final line of the `.dov`. This is a UTC timestamp; the field order is year, month, day, hour, minute, second (example: `# 20260329143022` for 2026-03-29 14:30:22 UTC).
 
 The timestamp serves one concrete purpose: it is the value that `--relate` compares against the `.rtv` footer to decide whether regeneration is needed. It also happens to be useful for auditing — a quick `tail -1 users.dov` tells you the last time the file was modified.
 

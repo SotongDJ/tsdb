@@ -216,7 +216,7 @@ city	London	EGk26cICK001
 city	Tokyo	NGk26cHcv001,NGk26cHdn002
 name	Alice	NGk26cHcv001
 name	Bob	NGk26cHdn002
-# 20262903143022
+# 20260329143022
 ```
 
 The final line is a timestamp matching the source `.dov`. If all three index files are already current (same timestamp), `--relate` is a no-op — safe to call before every query.
@@ -260,7 +260,7 @@ name	Dave	PGk26cHcv001
 role	admin	PGk26cHcv001
 role	editor	PGk26cHcv001
 role	viewer	PGk26cHcv001
-# 20262903143022
+# 20260329143022
 ```
 
 The `["admin","editor","viewer"]` stored on disk has been split into three rows; literal commas and quotes inside elements survive the round-trip. A malformed canonical array in the `.dov` aborts the run with a parse error rather than producing a corrupt index.

@@ -139,7 +139,7 @@ city	Tokyo	NGk26cHcv001,NGk26cHdn002
 name	Alice	NGk26cHcv001
 name	Bob	NGk26cHdn002
 name	Carol	EGk26cICK001
-# 20262903143022
+# 20260329143022
 ```
 
 `target.vk.rtv` (sorted by col 1, then col 2):
@@ -151,7 +151,7 @@ Bob	name	NGk26cHdn002
 Carol	name	EGk26cICK001
 London	city	EGk26cICK001
 Tokyo	city	NGk26cHcv001,NGk26cHdn002
-# 20262903143022
+# 20260329143022
 ```
 
 ### 2.4 Sorting
@@ -163,7 +163,7 @@ Rows are sorted lexicographically by column 1, then by column 2. This enables bi
 The last line of every `rtsv` file is a timestamp comment matching the latest timestamp recorded in the source `.dov`:
 
 ```
-# YYYYDDMMhhmmss
+# YYYYMMDDhhmmss
 ```
 
 This value is used by `--relate` to decide whether regeneration is needed (see §6.3).
@@ -247,7 +247,7 @@ city	Tokyo	NGk26cHdn002
 name	Alice	NGk26cHcv001
 name	Bob	NGk26cHdn002
 name	Carol	EGk26cICK001
-# 20262903143022
+# 20260329143022
 ```
 
 `target.vk.ptv` (sorted by col 1, col 2, col 3):
@@ -261,7 +261,7 @@ Carol	name	EGk26cICK001
 London	city	EGk26cICK001
 Tokyo	city	NGk26cHcv001
 Tokyo	city	NGk26cHdn002
-# 20262903143022
+# 20260329143022
 ```
 
 ### 3.4 Sorting
@@ -270,7 +270,7 @@ Rows are sorted lexicographically by column 1, then column 2, then column 3. Thi
 
 ### 3.5 Timestamp Footer
 
-Identical to `rtsv`: the last line is a `# YYYYDDMMhhmmss` comment matching the source `.dov`. This value drives the `--plane` skip-if-current check (see §7.3).
+Identical to `rtsv`: the last line is a `# YYYYMMDDhhmmss` comment matching the source `.dov`. This value drives the `--plane` skip-if-current check (see §7.3).
 
 ### 3.6 Properties
 
@@ -362,19 +362,19 @@ If mode were `intersect`: `{NGk26cHcv001, NGk26cHdn002, EGk26cICK001}` ∩ `{NGk
 All `tsdb` operations that write to a `.dov` file must append a timestamp comment as the final line:
 
 ```
-# YYYYDDMMhhmmss
+# YYYYMMDDhhmmss
 ```
 
 | Segment | Length | Example | Meaning |
 |---|---|---|---|
 | `YYYY` | 4 | `2026` | Calendar year |
-| `DD` | 2 | `29` | Day of month |
 | `MM` | 2 | `03` | Month |
+| `DD` | 2 | `29` | Day of month |
 | `hh` | 2 | `14` | Hour (24-hour clock) |
 | `mm` | 2 | `30` | Minute |
 | `ss` | 2 | `22` | Second |
 
-Full example: `# 20262903143022`
+Full example: `# 20260329143022`
 
 ### 5.1 Scope
 
@@ -408,7 +408,7 @@ tsdb --relate <target.dov>
    - Otherwise → regenerate both files.
 4. **Generate `<target>.kv.rtv`** — stream all records from the sorted section, emit one row per (key, value) pair, accumulating UUIDs; sort by (col 1, col 2); write.
 5. **Generate `<target>.vk.rtv`** — same pass but with columns 1 and 2 swapped; sort by (col 1, col 2); write.
-6. **Append timestamp footer** — write `# YYYYDDMMhhmmss` as the final line of each `.rtv` file, using the `.dov` timestamp read in step 2.
+6. **Append timestamp footer** — write `# YYYYMMDDhhmmss` as the final line of each `.rtv` file, using the `.dov` timestamp read in step 2.
 
 ### 6.3 Skip Condition
 
@@ -446,7 +446,7 @@ tsdb --plane <target.dov>
 3. **Check existing index** — if `<target>.kv.ptv` and `<target>.vk.ptv` both exist and their footers match the `.dov` timestamp → skip regeneration.
 4. **Generate `<target>.kv.ptv`** — stream all records from the sorted section; for each `(key, value)` pair, if the value is in canonical array form decode it and emit one row per `(key, element, uuid)` triple, otherwise emit a single `(key, value, uuid)` row; sort by (col 1, col 2, col 3); write.
 5. **Generate `<target>.vk.ptv`** — same pass with the array expansion applied on the col-1 side, emitting `(element, key, uuid)` rows.
-6. **Append timestamp footer** — write `# YYYYDDMMhhmmss` as the final line of each `.ptv` file.
+6. **Append timestamp footer** — write `# YYYYMMDDhhmmss` as the final line of each `.ptv` file.
 
 A malformed canonical array value in the source `.dov` (unquoted element, trailing backslash, missing closing bracket) aborts generation with a parse error rather than producing a partial or corrupt index.
 
@@ -550,7 +550,7 @@ Plain UUID list, one per line, no headers, no opcode prefixes. Suitable for pipi
 | `--plane` separate from `--relate` | The two modes produce different file sets with different consumers. Running them independently lets callers build only the indexes they need; sharing the skip-if-current machinery keeps the CLI surface symmetric. |
 | `--relate` compacts before indexing | The index must reflect the final merged state, not a state split across sorted and pending sections. Compaction is O(n) and idempotent. |
 | `--query` auto-invokes `--relate` | Callers should not need to know the index lifecycle. The skip condition makes the implicit call free when the index is current. |
-| Timestamp in `# YYYYDDMMhhmmss` format | A comment line at the end is ignored by all existing DOTSV parsers. The format is human-readable and sortable as a plain string. Appending rather than embedding avoids rewriting the file. |
+| Timestamp in `# YYYYMMDDhhmmss` format | A comment line at the end is ignored by all existing DOTSV parsers. The format is human-readable and sortable as a plain string. Appending rather than embedding avoids rewriting the file. |
 | `--compact` keeps only the last timestamp | Accumulated timestamps from incremental writes are noise after compaction. One timestamp per compacted file is sufficient and keeps the file clean for diffs. |
 | `qtsv` bare-token searches both indexes | A user writing `Tokyo` should not need to know whether `Tokyo` is a key or a value in the target database. Searching both is safe; the union cost is bounded by the size of the UUID arrays in the index. |
 
@@ -562,7 +562,7 @@ This section covers the v0.5 additions: `dtsv` (`.dtv`), `ftsv` (`.ftv`), the nu
 
 ### 11.1 `dtsv` — Display TSV (`*.dtv`)
 
-Generated by `tsdb --query <qtv> <dov> --show <out>` or `tsdb --filter <ftv> <dov> --show <out>`. One DOTSV record per non-comment line, copied byte-for-byte from the `.dov` sorted section (already escaped). Records sorted by UUID; KV pairs by key. Footer line `# YYYYDDMMhhmmss` matches the source `.dov`. Skip-if-current rule: footer match plus `mtime(criterion-file) < mtime(out)`.
+Generated by `tsdb --query <qtv> <dov> --show <out>` or `tsdb --filter <ftv> <dov> --show <out>`. One DOTSV record per non-comment line, copied byte-for-byte from the `.dov` sorted section (already escaped). Records sorted by UUID; KV pairs by key. Footer line `# YYYYMMDDhhmmss` matches the source `.dov`. Skip-if-current rule: footer match plus `mtime(criterion-file) < mtime(out)`.
 
 ### 11.2 `ftsv` — Filter TSV (`*.ftv`)
 
