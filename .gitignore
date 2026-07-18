@@ -29,3 +29,8 @@ _temp/
 # MaLTHA build artifacts
 mid_files/
 docs/
+
+# Local tsdb configuration (v0.7). Project-level config is per-developer and
+# must never be committed: cargo test runs with cwd = package root, so a
+# .tsdb.toml here silently changes the timestamp trailer under the whole suite.
+.tsdb.toml

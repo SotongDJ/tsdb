@@ -1,5 +1,6 @@
 mod action;
 mod base62;
+mod config;
 mod dotsv;
 mod error;
 mod escape;

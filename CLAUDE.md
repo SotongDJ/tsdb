@@ -21,7 +21,7 @@ Add `. "$HOME/.cargo/env"` to `~/.bashrc` to make this permanent.
 ```bash
 cargo build                        # debug build
 cargo build --release              # production build → target/release/tsdb
-cargo test                         # run all tests (382 tests as of v0.6)
+cargo test                         # run all tests (413 tests as of v0.7)
 cargo test <test_name>             # run a single test
 cargo fmt                          # format code
 cargo clippy                       # lint
@@ -85,6 +85,7 @@ Lines starting with `#` are comments; blank lines are ignored.
 | `src/lock.rs` | Lock file queue: register, promote, refresh, release |
 | `src/escape.rs` | DOTSV backslash-hex escaping / unescaping |
 | `src/base62.rs` | Base62-Gu UUID validation only (12-char, user-supplied) |
+| `src/config.rs` | Optional `.tsdb.toml` discovery + strict TOML-subset parser (v0.7) |
 | `src/error.rs` | Unified `TsdbError` enum |
 
 ### Key Design Principles
@@ -94,6 +95,7 @@ Lines starting with `#` are comments; blank lines are ignored.
 - **Fail-strict by default:** Conflicts produce errors rather than silent data loss
 - **Git-traceable:** Sorted records and deterministic ordering make diffs readable
 - **UUIDs are user-supplied:** `tsdb` validates 12-char base62-Gu UUIDs but never generates them
+- **Config is optional and never load-bearing:** absent or malformed `.tsdb.toml` falls back to documented defaults (a warning on stderr) rather than failing a write
 
 ### Code Review History
 

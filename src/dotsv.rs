@@ -504,14 +504,35 @@ pub fn atomic_write(db: &DotsvFile, target: &Path) -> Result<()> {
 // Timestamp helpers
 // ---------------------------------------------------------------------------
 
-/// Return the current UTC time formatted as `YYYYMMDDhhmmss`.
+/// Return the current time formatted as `YYYYMMDDhhmmss`.
+///
+/// The `utc_offset` setting from `.tsdb.toml` is applied, so the value reads
+/// in the operator's own wall-clock frame. With no configuration file present
+/// the offset is zero and the result is UTC, matching releases before
+/// configuration support existed.
 pub fn current_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    format_timestamp(secs)
+    format_timestamp(apply_offset(secs, crate::config::active().utc_offset_secs))
+}
+
+/// Shift a Unix epoch seconds value by an offset, saturating at both ends.
+///
+/// Saturation matters only for values within a day of the epoch (negative
+/// offset) or within a day of `u64::MAX` (positive). Neither arises in normal
+/// operation, but the sole caller derives its input via `unwrap_or_default()`,
+/// which yields `0` if the system clock reads before 1970 — so the lower path
+/// is reachable rather than merely theoretical. Saturating keeps the helper
+/// total: no panic, no wrap-around into a nonsense date.
+pub fn apply_offset(epoch_secs: u64, offset_secs: i64) -> u64 {
+    if offset_secs >= 0 {
+        epoch_secs.saturating_add(offset_secs as u64)
+    } else {
+        epoch_secs.saturating_sub(offset_secs.unsigned_abs())
+    }
 }
 
 /// Format a Unix epoch seconds value (UTC) as `YYYYMMDDhhmmss`.
@@ -568,6 +589,48 @@ mod tests {
     const GOOD_UUID1: &str = "AGk26cH00001";
     const GOOD_UUID2: &str = "AGk26cH00002";
     const GOOD_UUID3: &str = "AGk26cH00003";
+
+    // 2026-07-18 12:03:53 UTC — the shape of a real trailer value.
+    const SAMPLE_EPOCH: u64 = 1_784_376_233;
+
+    #[test]
+    fn apply_offset_zero_is_identity() {
+        assert_eq!(apply_offset(SAMPLE_EPOCH, 0), SAMPLE_EPOCH);
+    }
+
+    #[test]
+    fn apply_offset_positive_shifts_forward() {
+        assert_eq!(
+            apply_offset(SAMPLE_EPOCH, 8 * 3600),
+            SAMPLE_EPOCH + 8 * 3600
+        );
+    }
+
+    #[test]
+    fn apply_offset_negative_shifts_back() {
+        assert_eq!(
+            apply_offset(SAMPLE_EPOCH, -(5 * 3600)),
+            SAMPLE_EPOCH - 5 * 3600
+        );
+    }
+
+    #[test]
+    fn apply_offset_saturates_at_epoch() {
+        assert_eq!(apply_offset(0, -3600), 0);
+        assert_eq!(apply_offset(60, -3600), 0);
+    }
+
+    #[test]
+    fn apply_offset_changes_the_formatted_hour_by_the_offset() {
+        // The property that matters to a reader of a .dov trailer: a +08:00
+        // offset must render eight hours later than the same instant in UTC.
+        let utc = format_timestamp(apply_offset(SAMPLE_EPOCH, 0));
+        let plus8 = format_timestamp(apply_offset(SAMPLE_EPOCH, 8 * 3600));
+        assert_ne!(utc, plus8);
+        let utc_hour: u32 = utc[8..10].parse().unwrap();
+        let plus8_hour: u32 = plus8[8..10].parse().unwrap();
+        assert_eq!((utc_hour + 8) % 24, plus8_hour);
+    }
 
     fn make_db_with(records: &[(&str, &[(&str, &str)])]) -> DotsvFile {
         let mut sorted = Vec::new();
