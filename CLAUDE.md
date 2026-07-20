@@ -143,3 +143,13 @@ Apple and Orange MUST design without seeing each other's work — diverse propos
 - New requirements arriving mid-round go into the next round's `requirements.md`, not the current round.
 - Each approved round typically bumps the project version (e.g. round 1 = v0.4 → v0.5, round 2 = v0.5 → v0.6).
 - The user commits at the end. Do NOT commit on their behalf unless asked.
+
+## Build discipline
+
+- Build with `./build.sh`. On the maintainer's host it routes through a
+  machine-wide build guard that serialises Rust/Android builds (one at a time)
+  and registers build intermediates for a 24-hour cache expiry; compiled
+  executables are never removed by that cleanup. On any other machine the
+  script is equivalent to `cargo build --release`.
+- Prefer `./build.sh` over invoking cargo directly so the serialisation holds
+  wherever the guard is present.
