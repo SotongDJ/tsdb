@@ -34,3 +34,7 @@ docs/
 # must never be committed: cargo test runs with cwd = package root, so a
 # .tsdb.toml here silently changes the timestamp trailer under the whole suite.
 .tsdb.toml
+
+# Demo/scratch artifacts produced by running the demo or manual tsdb commands
+# in the package root (cargo test runs with cwd = package root).
+demo.*
