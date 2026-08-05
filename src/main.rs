@@ -73,7 +73,7 @@ fn main() {
             print_usage(UsageStream::Stdout);
             std::process::exit(0);
         }
-        2 if args[1] == "--version" || args[1] == "-V" => {
+        2 if args[1] == "--version" || args[1] == "-V" || args[1] == "-v" => {
             println!("tsdb {}", VERSION);
             std::process::exit(0);
         }
